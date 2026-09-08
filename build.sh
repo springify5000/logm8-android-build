@@ -30,14 +30,47 @@ if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install 
 
 echo "== 2/6 web bundle from $SITE"
 rm -rf www && mkdir -p www/vendor
+# SiteGround's anti-bot layer sometimes answers data-centre IPs (GitHub runners) with a tiny
+# 200 page instead of the file. Use browser-like headers, rotate user agents, fall back to the
+# non-www host and retry with backoff. Anything that is not the real app is rejected.
+UAS=(
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
+  "$UA"
+)
+HOSTS=("$SITE" "${SITE_ALT:-https://logm8.com.au}")
+get() { # get <url> <out>
+  curl -fsSL -A "$UA" --retry 2 --retry-delay 3 --max-time 60 \
+       -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+       -H "Accept-Language: en-AU,en;q=0.9" -H "Referer: $SITE/" "$1" -o "$2"
+}
+fetch_app() {
+  local attempt host
+  for attempt in 1 2 3; do
+    for host in "${HOSTS[@]}"; do
+      for UA in "${UAS[@]}"; do
+        if get "$host/app.html" www/index.html 2>/dev/null && grep -q "LOGM8_APP_CACHE_VERSION" www/index.html; then
+          SITE="$host"
+          echo "   app.html -> www/index.html ($(stat -c%s www/index.html) bytes) from $host"
+          return 0
+        fi
+        echo "   not the app from $host [UA ${UA:0:24}...] ($(stat -c%s www/index.html 2>/dev/null || echo 0) bytes):"
+        echo "   >> $(head -c 240 www/index.html 2>/dev/null | tr '\r\n' '  ')"
+        rm -f www/index.html
+      done
+    done
+    echo "   waiting 45s before retry $((attempt+1))..."; sleep 45
+  done
+  return 1
+}
+fetch_app || { echo "ERROR: could not fetch the LogM8 app from $SITE"; exit 1; }
 fetch() {
-  if curl -fsSL -A "$UA" --retry 3 --retry-delay 2 "$SITE/$1" -o "www/$2"; then
+  if get "$SITE/$1" "www/$2"; then
     echo "   $1 -> www/$2 ($(stat -c%s "www/$2") bytes)"
   else
     echo "   WARNING: could not fetch $1"; rm -f "www/$2"; return 1
   fi
 }
-fetch app.html index.html
 # Static files the app references. No sw.js on purpose: a service worker inside the
 # native shell would pin an old index.html across app updates.
 for f in manifest.json icon-logm8-v2-192.png icon-logm8-v2-512.png icon-logm8-v2-180.png \
