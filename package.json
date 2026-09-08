@@ -1,0 +1,19 @@
+{
+  "name": "logm8-android-build",
+  "version": "1.0.0",
+  "description": "Capacitor 8 wrapper that builds the LogM8 Android app bundle (AAB) from the live web app",
+  "scripts": {
+    "build": "bash build.sh"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/cli": "^8.5.1",
+    "@capacitor/core": "^8.5.1",
+    "@revenuecat/purchases-capacitor": "^13.5.0",
+    "esbuild": "^0.28.2"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5"
+  },
+  "private": true
+}

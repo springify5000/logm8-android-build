@@ -1,0 +1,13 @@
+{
+  "appId": "au.com.logm8.app",
+  "appName": "LogM8",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false,
+    "backgroundColor": "#0a0a0a"
+  }
+}
