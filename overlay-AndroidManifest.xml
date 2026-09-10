@@ -24,6 +24,20 @@
 
         </activity>
 
+        <!-- Owner home-screen widget (dashboard totals) -->
+        <receiver
+            android:name=".AdminWidgetProvider"
+            android:exported="true"
+            android:label="LogM8 owner stats">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="au.com.logm8.app.ADMIN_WIDGET_REFRESH" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_admin_info" />
+        </receiver>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

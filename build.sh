@@ -116,13 +116,19 @@ npx esbuild node_modules/@revenuecat/purchases-capacitor/dist/esm/index.js \
 npx esbuild vendor-src/firebase-authentication.js \
   --bundle --format=esm --platform=browser --log-level=warning \
   --outfile=www/vendor/firebase-authentication.js
+# Owner home-screen widget: the web app hands the signed-in user's refresh token to native storage
+# (Capacitor Preferences) so the widget can fetch dashboard totals in the background.
+npx esbuild node_modules/@capacitor/preferences/dist/esm/index.js \
+  --bundle --format=esm --platform=browser --log-level=warning \
+  --outfile=www/vendor/preferences.js
 RC_ANDROID_KEY="${RC_ANDROID_KEY:-}" python3 - <<'PY'
 import os, re
 p = 'www/index.html'
 s = open(p, encoding='utf-8').read()
 importmap = ('<script type="importmap">{"imports":{'
              '"@revenuecat/purchases-capacitor":"./vendor/purchases-capacitor.js",'
-             '"@capacitor-firebase/authentication":"./vendor/firebase-authentication.js"'
+             '"@capacitor-firebase/authentication":"./vendor/firebase-authentication.js",'
+             '"@capacitor/preferences":"./vendor/preferences.js"'
              '}}</script>')
 if 'type="importmap"' not in s:
     s = re.sub(r'(<head[^>]*>)', lambda m: m.group(1) + '\n' + importmap, s, count=1)
@@ -165,6 +171,33 @@ else:
         print('   native Google Sign-In patch applied')
     else:
         raise SystemExit(f'ERROR: native Google Sign-In patch failed (import={n1} helper={n2} branch={n3}) - app.html changed?')
+
+# --- owner widget auth bridge (no-op if already present) ---
+if 'logm8_widget_auth' in s:
+    print('   widget auth bridge already present')
+else:
+    bridge = (
+        "// Owner home-screen widget (Android app only): keep the Firebase refresh token in native\n"
+        "// storage so the widget can load dashboard totals in the background.\n"
+        "if (isNative()) {\n"
+        "  onAuthStateChanged(auth, async (widgetUser) => {\n"
+        "    try {\n"
+        "      const { Preferences } = await import('@capacitor/preferences');\n"
+        "      if (widgetUser && widgetUser.refreshToken) {\n"
+        "        await Preferences.set({ key: 'logm8_widget_auth', value: JSON.stringify({ uid: widgetUser.uid, email: widgetUser.email || '', refreshToken: widgetUser.refreshToken, savedAtMs: Date.now() }) });\n"
+        "      } else {\n"
+        "        await Preferences.remove({ key: 'logm8_widget_auth' });\n"
+        "      }\n"
+        "    } catch (e) { console.warn('widget auth bridge:', e); }\n"
+        "  });\n"
+        "}\n"
+        "async function nativeGoogleSignIn() {"
+    )
+    s, n4 = re.subn(r"async function nativeGoogleSignIn\(\) \{", bridge, s, count=1)
+    if n4 == 1:
+        print('   widget auth bridge applied')
+    else:
+        raise SystemExit('ERROR: widget auth bridge patch failed')
 key = os.environ.get('RC_ANDROID_KEY', '').strip()
 pat = r"(const\s+RC_ANDROID_KEY\s*=\s*)'YOUR_REVENUECAT_ANDROID_KEY'"
 if key.startswith('goog_'):
@@ -197,6 +230,10 @@ sed -i 's/^ext {/ext {\n    rgcfaIncludeGoogle = true/' android/variables.gradle
 grep -q rgcfaIncludeGoogle android/variables.gradle || { echo "ERROR: could not set rgcfaIncludeGoogle"; exit 1; }
 sed -e "s/__VERSION_CODE__/${VERSION_CODE}/" -e "s/__VERSION_NAME__/${VERSION_NAME}/" \
     overlay-app-build.gradle > android/app/build.gradle
+# Native extras (owner home-screen widget): Java sources + resources
+cp -R overlay-android/java/. android/app/src/main/java/
+cp -R overlay-android/res/. android/app/src/main/res/
+echo "   native overlay: $(find overlay-android -type f | wc -l) files (widget)"
 if [ -n "${KEYSTORE_B64:-}" ]; then
   echo "$KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > android/app/upload.jks
   {

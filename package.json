@@ -10,6 +10,7 @@
     "@capacitor/android": "^8.5.1",
     "@capacitor/cli": "^8.5.1",
     "@capacitor/core": "^8.5.1",
+    "@capacitor/preferences": "^8.0.1",
     "@revenuecat/purchases-capacitor": "^13.5.0",
     "esbuild": "^0.28.2"
   },
