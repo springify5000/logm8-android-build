@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="180" viewBox="0 0 760 180" role="img" aria-label="LogM8 ATO Vehicle Logbook">
+  <rect width="760" height="180" rx="28" fill="#080c08"/>
+  <text x="46" y="106" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="74" font-weight="800" letter-spacing="-3">LogM</text>
+  <text x="235" y="106" fill="#7fff4a" font-family="Arial, Helvetica, sans-serif" font-size="74" font-weight="800" letter-spacing="-3">8</text>
+  <text x="330" y="102" fill="#cdd8c6" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700">ATO VEHICLE LOGBOOK</text>
+  <text x="330" y="134" fill="#7f8a7a" font-family="Arial, Helvetica, sans-serif" font-size="18">Generated report export</text>
+</svg>

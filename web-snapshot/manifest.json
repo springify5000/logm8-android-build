@@ -1,0 +1,76 @@
+{
+    "id":  "/app.html",
+    "name":  "LogM8 - ATO Logbook",
+    "short_name":  "LogM8",
+    "version":  "1.5.28",
+    "description":  "ATO-ready logbook for Australian drivers. Track trips, fuel, expenses, XLSX exports and PDF reports.",
+    "start_url":  "/app.html",
+    "scope":  "/",
+    "display":  "standalone",
+    "display_override":  [
+                             "standalone",
+                             "minimal-ui",
+                             "browser"
+                         ],
+    "launch_handler":  {
+                           "client_mode":  "focus-existing"
+                       },
+    "orientation":  "portrait",
+    "background_color":  "#0a0a0a",
+    "theme_color":  "#7fff4a",
+    "lang":  "en-AU",
+    "categories":  [
+                       "finance",
+                       "utilities",
+                       "productivity"
+                   ],
+    "prefer_related_applications":  false,
+    "related_applications":  [
+                                 {
+                                     "platform":  "webapp",
+                                     "url":  "https://www.logm8.com.au/manifest.json"
+                                 },
+                                 {
+                                     "platform":  "play",
+                                     "id":  "au.com.logm8.app"
+                                 }
+                             ],
+    "icons":  [
+                  {
+                      "src":  "/icon-logm8-v2-192.png?brand=4",
+                      "sizes":  "192x192",
+                      "type":  "image/png",
+                      "purpose":  "any maskable"
+                  },
+                  {
+                      "src":  "/icon-logm8-v2-512.png?brand=4",
+                      "sizes":  "512x512",
+                      "type":  "image/png",
+                      "purpose":  "any maskable"
+                  }
+              ],
+    "shortcuts":  [
+                      {
+                          "name":  "Start Trip",
+                          "short_name":  "Start",
+                          "description":  "Start tracking a new trip",
+                      "url":  "/app.html?shortcut=start"
+                      },
+                      {
+                          "name":  "Add Expense",
+                          "short_name":  "Expense",
+                          "description":  "Log a fuel receipt or expense",
+                      "url":  "/app.html?shortcut=expense"
+                      },
+                      {
+                          "name":  "Export Report",
+                          "short_name":  "Export",
+                          "description":  "Export XLSX or PDF logbook reports",
+                      "url":  "/app.html?shortcut=export"
+                      }
+                  ]
+}
+
+
+
+
