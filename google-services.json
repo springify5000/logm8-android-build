@@ -1,0 +1,55 @@
+{
+  "project_info": {
+    "project_number": "834194366662",
+    "project_id": "logm8-ccb7b",
+    "storage_bucket": "logm8-ccb7b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:834194366662:android:394fada7c50206fb1d37c7",
+        "android_client_info": {
+          "package_name": "au.com.logm8.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "834194366662-8uau2n7cgoqblrm2j11pm1l8vkvq8h9m.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "au.com.logm8.app",
+            "certificate_hash": "c28d45b98934415e58587c43a9d69ef3c982a437"
+          }
+        },
+        {
+          "client_id": "834194366662-p66rnlp20h6eea1lukavr367ek8tiit1.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "au.com.logm8.app",
+            "certificate_hash": "659177c7ecd01eff8072ddf53f8f08567bc931df"
+          }
+        },
+        {
+          "client_id": "834194366662-4a68gfi92hm4e8nr34ebfk7qe0inqmeb.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBSJvrDl9xdWOThycBiW5erNdUk3g35e3Q"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "834194366662-4a68gfi92hm4e8nr34ebfk7qe0inqmeb.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

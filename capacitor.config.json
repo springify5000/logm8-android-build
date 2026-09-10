@@ -9,5 +9,13 @@
     "allowMixedContent": false,
     "webContentsDebuggingEnabled": false,
     "backgroundColor": "#0a0a0a"
+  },
+  "plugins": {
+    "FirebaseAuthentication": {
+      "skipNativeAuth": true,
+      "providers": [
+        "google.com"
+      ]
+    }
   }
 }

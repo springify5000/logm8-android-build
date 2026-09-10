@@ -12,6 +12,8 @@
 #   KEY_ALIAS          key alias                              (default logm8upload)
 #   KEY_PASSWORD       key password
 #   RC_ANDROID_KEY     RevenueCat Android public API key (goog_...) -> enables native subscriptions
+#   GOOGLE_SERVICES_JSON_B64  base64 of google-services.json (optional; a google-services.json committed
+#                      next to this script is used otherwise) -> enables native Google Sign-In
 #
 # Output: android/app/build/outputs/bundle/release/app-release.aab
 set -euo pipefail
@@ -86,15 +88,62 @@ echo "== 3/6 native tweaks"
 npx esbuild node_modules/@revenuecat/purchases-capacitor/dist/esm/index.js \
   --bundle --format=esm --platform=browser --log-level=warning \
   --outfile=www/vendor/purchases-capacitor.js
+# Native Google Sign-In: the web app's "Continue with Google" uses signInWithRedirect, which cannot
+# work inside the Android WebView (it bounces to Chrome and back to https://localhost). Inside the
+# app we call the native Firebase Authentication plugin instead and hand the Google ID token to the
+# Firebase JS SDK (signInWithCredential). The bridge below is what `import('@capacitor-firebase/authentication')` resolves to.
+npx esbuild vendor-src/firebase-authentication.js \
+  --bundle --format=esm --platform=browser --log-level=warning \
+  --outfile=www/vendor/firebase-authentication.js
 RC_ANDROID_KEY="${RC_ANDROID_KEY:-}" python3 - <<'PY'
 import os, re
 p = 'www/index.html'
 s = open(p, encoding='utf-8').read()
-importmap = ('<script type="importmap">{"imports":{"@revenuecat/purchases-capacitor":'
-             '"./vendor/purchases-capacitor.js"}}</script>')
+importmap = ('<script type="importmap">{"imports":{'
+             '"@revenuecat/purchases-capacitor":"./vendor/purchases-capacitor.js",'
+             '"@capacitor-firebase/authentication":"./vendor/firebase-authentication.js"'
+             '}}</script>')
 if 'type="importmap"' not in s:
     s = re.sub(r'(<head[^>]*>)', lambda m: m.group(1) + '\n' + importmap, s, count=1)
     print('   import map injected')
+
+# --- native Google Sign-In patch (no-op if the app already ships nativeGoogleSignIn) ---
+if 'nativeGoogleSignIn' in s:
+    print('   native Google Sign-In already present in app.html')
+else:
+    imp_pat = r"(getRedirectResult,\s*GoogleAuthProvider,)"
+    s, n1 = re.subn(imp_pat, r"\1 signInWithCredential,", s, count=1)
+    helper = (
+        "// Native Google Sign-In (Android app only). Web keeps signInWithRedirect.\n"
+        "async function nativeGoogleSignIn() {\n"
+        "  const { FirebaseAuthentication } = await import('@capacitor-firebase/authentication');\n"
+        "  const result = await FirebaseAuthentication.signInWithGoogle({ scopes: ['email', 'profile'] });\n"
+        "  const idToken = result?.credential?.idToken;\n"
+        "  if (!idToken) { const err = new Error('Google sign-in did not return a token'); err.code = 'auth/native-no-token'; throw err; }\n"
+        "  const credential = GoogleAuthProvider.credential(idToken, result?.credential?.accessToken || undefined);\n"
+        "  await signInWithCredential(auth, credential);\n"
+        "}\n"
+        "window.signInGoogle = async () => {"
+    )
+    s, n2 = re.subn(r"window\.signInGoogle\s*=\s*async\s*\(\)\s*=>\s*\{", helper, s, count=1)
+    branch = (
+        "await authPersistenceReady;\n"
+        "    if (isNative()) {\n"
+        "      try { await nativeGoogleSignIn(); }\n"
+        "      catch (e) { if (!/cancel/i.test(String(e?.message || e?.code || ''))) showAuthError(friendlyError(e?.code || 'auth/native-google-failed')); }\n"
+        "      return;\n"
+        "    }\n"
+        "    try { sessionStorage.setItem('logm8_google_redirect_pending', '1'); } catch (_err) {}\n"
+        "    await signInWithRedirect(auth, googleProvider);"
+    )
+    branch_pat = (r"await authPersistenceReady;\s*"
+                  r"try \{ sessionStorage\.setItem\('logm8_google_redirect_pending', '1'\); \} catch \(_err\) \{\}\s*"
+                  r"await signInWithRedirect\(auth, googleProvider\);")
+    s, n3 = re.subn(branch_pat, branch, s, count=1)
+    if n1 == 1 and n2 == 1 and n3 == 1:
+        print('   native Google Sign-In patch applied')
+    else:
+        raise SystemExit(f'ERROR: native Google Sign-In patch failed (import={n1} helper={n2} branch={n3}) - app.html changed?')
 key = os.environ.get('RC_ANDROID_KEY', '').strip()
 pat = r"(const\s+RC_ANDROID_KEY\s*=\s*)'YOUR_REVENUECAT_ANDROID_KEY'"
 if key.startswith('goog_'):
@@ -111,6 +160,20 @@ echo "== 4/6 Capacitor Android project"
 rm -rf android
 npx cap add android
 cp -f overlay-AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+# Firebase Android config (Google Sign-In). Not a secret: the same values ship inside the APK.
+if [ -n "${GOOGLE_SERVICES_JSON_B64:-}" ]; then
+  echo "$GOOGLE_SERVICES_JSON_B64" | tr -d '\n\r ' | base64 -d > android/app/google-services.json
+elif [ -f google-services.json ]; then
+  cp -f google-services.json android/app/google-services.json
+fi
+if [ -f android/app/google-services.json ]; then
+  python3 -c "import json;d=json.load(open('android/app/google-services.json'));print('   google-services.json: project', d['project_info']['project_id'], '| apps:', [c['client_info']['android_client_info']['package_name'] for c in d['client']])"
+else
+  echo "   WARNING: no google-services.json -> native Google Sign-In will fail at runtime"
+fi
+# @capacitor-firebase/authentication only links the Google Sign-In SDK when this flag is set
+sed -i 's/^ext {/ext {\n    rgcfaIncludeGoogle = true/' android/variables.gradle
+grep -q rgcfaIncludeGoogle android/variables.gradle || { echo "ERROR: could not set rgcfaIncludeGoogle"; exit 1; }
 sed -e "s/__VERSION_CODE__/${VERSION_CODE}/" -e "s/__VERSION_NAME__/${VERSION_NAME}/" \
     overlay-app-build.gradle > android/app/build.gradle
 if [ -n "${KEYSTORE_B64:-}" ]; then
