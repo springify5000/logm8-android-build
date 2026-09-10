@@ -7,6 +7,8 @@
 #   VERSION_NAME       versionName shown to users            (default 1.5.29)
 #   VERSION_CODE       integer, must increase every upload   (default 11)
 #   SITE_URL           where the web app is fetched from     (default https://www.logm8.com.au)
+#   WEB_SOURCE         auto | site | snapshot  (default auto: live site first, then web-snapshot/
+#                      when SiteGround's anti-bot challenge blocks the runner)
 #   KEYSTORE_B64       base64 of the upload keystore (.jks)  -> signed release
 #   KEYSTORE_PASSWORD  keystore password
 #   KEY_ALIAS          key alias                              (default logm8upload)
@@ -48,7 +50,7 @@ get() { # get <url> <out>
 }
 fetch_app() {
   local attempt host
-  for attempt in 1 2 3; do
+  for attempt in 1 2; do
     for host in "${HOSTS[@]}"; do
       for UA in "${UAS[@]}"; do
         if get "$host/app.html" www/index.html 2>/dev/null && grep -q "LOGM8_APP_CACHE_VERSION" www/index.html; then
@@ -57,15 +59,14 @@ fetch_app() {
           return 0
         fi
         echo "   not the app from $host [UA ${UA:0:24}...] ($(stat -c%s www/index.html 2>/dev/null || echo 0) bytes):"
-        echo "   >> $(head -c 240 www/index.html 2>/dev/null | tr '\r\n' '  ')"
+        echo "   >> $(head -c 200 www/index.html 2>/dev/null | tr '\r\n' '  ')"
         rm -f www/index.html
       done
     done
-    echo "   waiting 45s before retry $((attempt+1))..."; sleep 45
+    [ "$attempt" = 1 ] && { echo "   waiting 20s before retry..."; sleep 20; }
   done
   return 1
 }
-fetch_app || { echo "ERROR: could not fetch the LogM8 app from $SITE"; exit 1; }
 fetch() {
   if get "$SITE/$1" "www/$2"; then
     echo "   $1 -> www/$2 ($(stat -c%s "www/$2") bytes)"
@@ -75,11 +76,31 @@ fetch() {
 }
 # Static files the app references. No sw.js on purpose: a service worker inside the
 # native shell would pin an old index.html across app updates.
-for f in manifest.json icon-logm8-v2-192.png icon-logm8-v2-512.png icon-logm8-v2-180.png \
-         favicon-32.png favicon-16.png logo-report.png logo-report.svg logbook-template.xlsx \
-         version.json health.json privacy.html delete-account.html; do
-  fetch "$f" "$f" || true
-done
+STATIC_FILES="manifest.json icon-logm8-v2-192.png icon-logm8-v2-512.png icon-logm8-v2-180.png \
+  favicon-32.png favicon-16.png logo-report.png logo-report.svg logbook-template.xlsx \
+  version.json health.json privacy.html delete-account.html"
+use_snapshot() {
+  [ -f web-snapshot/app.html ] || { echo "ERROR: web-snapshot/app.html missing"; return 1; }
+  rm -rf www && mkdir -p www/vendor
+  cp web-snapshot/app.html www/index.html
+  for f in $STATIC_FILES; do [ -f "web-snapshot/$f" ] && cp "web-snapshot/$f" "www/$f"; done
+  echo "   web bundle taken from web-snapshot/ (app $(grep -o 'LOGM8_APP_CACHE_VERSION = [0-9]*' www/index.html), $(python3 -c "import json;print(json.load(open('www/version.json'))['appVersion'])" 2>/dev/null || echo '?'))"
+}
+WEB_SOURCE="${WEB_SOURCE:-auto}"
+case "$WEB_SOURCE" in
+  snapshot)
+    use_snapshot || exit 1 ;;
+  site)
+    fetch_app || { echo "ERROR: could not fetch the LogM8 app from $SITE"; exit 1; }
+    for f in $STATIC_FILES; do fetch "$f" "$f" || true; done ;;
+  *)
+    if fetch_app; then
+      for f in $STATIC_FILES; do fetch "$f" "$f" || true; done
+    else
+      echo "   WARNING: live site unreachable from this runner (SiteGround anti-bot?) -> using web-snapshot/"
+      use_snapshot || exit 1
+    fi ;;
+esac
 grep -q "LOGM8_APP_CACHE_VERSION" www/index.html || { echo "ERROR: www/index.html is not the LogM8 app"; exit 1; }
 
 echo "== 3/6 native tweaks"
