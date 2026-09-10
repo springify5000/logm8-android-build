@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_admin_description">Owner stats: users, paying, trials and activity</string>
+</resources>
