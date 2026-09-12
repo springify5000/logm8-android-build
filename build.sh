@@ -198,6 +198,46 @@ else:
         print('   widget auth bridge applied')
     else:
         raise SystemExit('ERROR: widget auth bridge patch failed')
+# --- closed-testing tester allowlist (tester-hashes.txt) ---
+# Testers get the app's demo/test tier (never trial-locked, Pro features) so they can test
+# for months without paying. Only SHA-256 hashes of the tester emails ship in the build
+# (hash-testers.sh turns the local, uncommitted tester-emails.txt into tester-hashes.txt).
+hashes = []
+if os.path.exists('tester-hashes.txt'):
+    for line in open('tester-hashes.txt', encoding='utf-8'):
+        h = line.split('#', 1)[0].strip().lower()
+        if re.fullmatch(r'[0-9a-f]{64}', h) and h not in hashes:
+            hashes.append(h)
+if 'TESTER_EMAIL_HASHES' in s:
+    print('   tester allowlist already present in app.html')
+else:
+    hash_list = ', '.join("'" + h + "'" for h in hashes)
+    tester_code = (
+        "// Closed-testing allowlist (Android build only): SHA-256 hashes of tester emails.\n"
+        "// Matching users get the demo/test tier with Pro features and are never trial-locked.\n"
+        "const TESTER_EMAIL_HASHES = new Set([" + hash_list + "]);\n"
+        "let currentUserIsTester = false;\n"
+        "async function refreshTesterFlag(user) {\n"
+        "  currentUserIsTester = false;\n"
+        "  try {\n"
+        "    const email = String(user?.email || '').trim().toLowerCase();\n"
+        "    if (!email || !TESTER_EMAIL_HASHES.size || !window.crypto?.subtle) return;\n"
+        "    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(email));\n"
+        "    const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');\n"
+        "    currentUserIsTester = TESTER_EMAIL_HASHES.has(hex);\n"
+        "  } catch (e) { console.warn('tester allowlist check:', e); }\n"
+        "}\n"
+        "const DEMO_TIER_BY_EMAIL = {"
+    )
+    s, t1 = re.subn(r"const\s+DEMO_TIER_BY_EMAIL\s*=\s*\{", lambda m: tester_code, s, count=1)
+    s, t2 = re.subn(r"(function getDemoTierOverride\(\) \{)", r"\1\n  if (currentUserIsTester) return 'test';", s, count=1)
+    s, t3 = re.subn(r"(function getDemoAccessOverride\(\) \{)", r"\1\n  if (currentUserIsTester) return 'pro';", s, count=1)
+    s, t4 = re.subn(r"(resetAuthButtons\(\);\s*currentUser = user;)", r"\1\n    await refreshTesterFlag(user);", s, count=1)
+    if t1 == 1 and t2 == 1 and t3 == 1 and t4 == 1:
+        print(f'   tester allowlist applied: {len(hashes)} email hashes')
+    else:
+        raise SystemExit(f'ERROR: tester allowlist patch failed (const={t1} tier={t2} access={t3} hook={t4}) - app.html changed?')
+
 key = os.environ.get('RC_ANDROID_KEY', '').strip()
 pat = r"(const\s+RC_ANDROID_KEY\s*=\s*)'YOUR_REVENUECAT_ANDROID_KEY'"
 if key.startswith('goog_'):

@@ -5,3 +5,6 @@ www/
 keystore.properties
 *.aab
 *.apk
+
+# Personal data: tester emails stay local (only tester-hashes.txt is committed)
+tester-emails.txt
