@@ -238,6 +238,13 @@ else:
     else:
         raise SystemExit(f'ERROR: tester allowlist patch failed (const={t1} tier={t2} access={t3} hook={t4}) - app.html changed?')
 
+# --- avatar fallback: Google profile photos can fail to load inside the WebView (broken "avatar"
+# alt text). Send no referrer and fall back to the initial letter on error. Idempotent.
+if 'referrerpolicy="no-referrer"' not in s:
+    s, n_av = re.subn(r'<img src="\$\{photo\}" alt="avatar"/>',
+                      '<img src="${photo}" alt="avatar" referrerpolicy="no-referrer" onerror="this.parentNode.textContent=\'${initial}\'"/>', s)
+    print(f'   avatar fallback applied ({n_av} places)')
+
 key = os.environ.get('RC_ANDROID_KEY', '').strip()
 pat = r"(const\s+RC_ANDROID_KEY\s*=\s*)'YOUR_REVENUECAT_ANDROID_KEY'"
 if key.startswith('goog_'):
