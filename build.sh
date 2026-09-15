@@ -107,19 +107,19 @@ echo "== 3/6 native tweaks"
 # The app does `await import('@revenuecat/purchases-capacitor')` (a bare specifier). Bundle the
 # plugin as a single ESM file and map the specifier to it with an import map.
 npx esbuild node_modules/@revenuecat/purchases-capacitor/dist/esm/index.js \
-  --bundle --format=esm --platform=browser --log-level=warning \
+  --bundle --format=esm --platform=browser --target=chrome70 --log-level=warning \
   --outfile=www/vendor/purchases-capacitor.js
 # Native Google Sign-In: the web app's "Continue with Google" uses signInWithRedirect, which cannot
 # work inside the Android WebView (it bounces to Chrome and back to https://localhost). Inside the
 # app we call the native Firebase Authentication plugin instead and hand the Google ID token to the
 # Firebase JS SDK (signInWithCredential). The bridge below is what `import('@capacitor-firebase/authentication')` resolves to.
 npx esbuild vendor-src/firebase-authentication.js \
-  --bundle --format=esm --platform=browser --log-level=warning \
+  --bundle --format=esm --platform=browser --target=chrome70 --log-level=warning \
   --outfile=www/vendor/firebase-authentication.js
 # Owner home-screen widget: the web app hands the signed-in user's refresh token to native storage
 # (Capacitor Preferences) so the widget can fetch dashboard totals in the background.
 npx esbuild node_modules/@capacitor/preferences/dist/esm/index.js \
-  --bundle --format=esm --platform=browser --log-level=warning \
+  --bundle --format=esm --platform=browser --target=chrome70 --log-level=warning \
   --outfile=www/vendor/preferences.js
 RC_ANDROID_KEY="${RC_ANDROID_KEY:-}" python3 - <<'PY'
 import os, re
@@ -254,6 +254,28 @@ else:
     print('   RevenueCat key not provided -> native purchases disabled in this build')
 open(p, 'w', encoding='utf-8').write(s)
 PY
+# Older Android System WebViews (e.g. Huawei/EMUI phones that never updated it) choke on modern
+# syntax: optional chaining needs Chrome 80+, import maps Chrome 89+. A SyntaxError there leaves
+# the app stuck on the loading screen. Down-level the inline app module to Chrome 70 and point the
+# dynamic plugin imports at the bundled vendor files directly (no import map needed).
+node - <<'JS'
+const fs = require('fs');
+const { transformSync } = require('esbuild');
+const p = 'www/index.html';
+let s = fs.readFileSync(p, 'utf8');
+const re = /<script type="module">([\s\S]*?)<\/script>/;
+const m = s.match(re);
+if (!m) throw new Error('inline module script not found in index.html');
+const js = m[1]
+  .replace(/import\('@revenuecat\/purchases-capacitor'\)/g, "import('./vendor/purchases-capacitor.js')")
+  .replace(/import\('@capacitor-firebase\/authentication'\)/g, "import('./vendor/firebase-authentication.js')")
+  .replace(/import\('@capacitor\/preferences'\)/g, "import('./vendor/preferences.js')");
+const polyfill = "if (!Promise.allSettled) { Promise.allSettled = function (ps) { return Promise.all(Array.from(ps, function (p) { return Promise.resolve(p).then(function (value) { return { status: 'fulfilled', value: value }; }, function (reason) { return { status: 'rejected', reason: reason }; }); })); }; }\n";
+const out = transformSync(js, { target: 'chrome70', format: 'esm', loader: 'js', legalComments: 'none' }).code;
+s = s.replace(re, () => '<script type="module">\n' + polyfill + out + '</script>');
+fs.writeFileSync(p, s);
+console.log('   app module down-levelled for old WebViews (chrome70): ' + js.length + ' -> ' + out.length + ' chars');
+JS
 cp www/index.html www/app.html   # the app links to /app.html in a few places
 echo "   web bundle: $(du -sh www | cut -f1)"
 
