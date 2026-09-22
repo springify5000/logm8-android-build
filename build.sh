@@ -4,7 +4,7 @@
 # and builds a signed Android App Bundle (AAB) ready for the Play Console.
 #
 # Inputs (environment variables):
-#   VERSION_NAME       versionName shown to users            (default 1.5.29)
+#   VERSION_NAME       versionName shown to users            (default 1.5.30)
 #   VERSION_CODE       integer, must increase every upload   (default 11)
 #   SITE_URL           where the web app is fetched from     (default https://www.logm8.com.au)
 #   WEB_SOURCE         auto | site | snapshot  (default auto: live site first, then web-snapshot/
@@ -23,7 +23,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
 SITE="${SITE_URL:-https://www.logm8.com.au}"
-VERSION_NAME="${VERSION_NAME:-1.5.29}"
+VERSION_NAME="${VERSION_NAME:-1.5.30}"
 VERSION_CODE="${VERSION_CODE:-11}"
 UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36 LogM8-Build"
 
@@ -86,7 +86,9 @@ use_snapshot() {
   for f in $STATIC_FILES; do [ -f "web-snapshot/$f" ] && cp "web-snapshot/$f" "www/$f"; done
   echo "   web bundle taken from web-snapshot/ (app $(grep -o 'LOGM8_APP_CACHE_VERSION = [0-9]*' www/index.html), $(python3 -c "import json;print(json.load(open('www/version.json'))['appVersion'])" 2>/dev/null || echo '?'))"
 }
-WEB_SOURCE="${WEB_SOURCE:-auto}"
+# Default = snapshot: web-snapshot/app.html carries app changes that are not on the live site yet
+# (trip guard 1.5.30). Use WEB_SOURCE=site only after the same app.html has been deployed there.
+WEB_SOURCE="${WEB_SOURCE:-snapshot}"
 case "$WEB_SOURCE" in
   snapshot)
     use_snapshot || exit 1 ;;
@@ -121,6 +123,11 @@ npx esbuild vendor-src/firebase-authentication.js \
 npx esbuild node_modules/@capacitor/preferences/dist/esm/index.js \
   --bundle --format=esm --platform=browser --target=chrome70 --log-level=warning \
   --outfile=www/vendor/preferences.js
+# Trip reminders: local notifications scheduled by the OS ("trip still running" 1h/2h/4h/8h/12h
+# after Start), so they fire even when the app is closed. The web app imports the plugin lazily.
+npx esbuild node_modules/@capacitor/local-notifications/dist/esm/index.js \
+  --bundle --format=esm --platform=browser --target=chrome70 --log-level=warning \
+  --outfile=www/vendor/local-notifications.js
 RC_ANDROID_KEY="${RC_ANDROID_KEY:-}" python3 - <<'PY'
 import os, re
 p = 'www/index.html'
@@ -128,7 +135,8 @@ s = open(p, encoding='utf-8').read()
 importmap = ('<script type="importmap">{"imports":{'
              '"@revenuecat/purchases-capacitor":"./vendor/purchases-capacitor.js",'
              '"@capacitor-firebase/authentication":"./vendor/firebase-authentication.js",'
-             '"@capacitor/preferences":"./vendor/preferences.js"'
+             '"@capacitor/preferences":"./vendor/preferences.js",'
+             '"@capacitor/local-notifications":"./vendor/local-notifications.js"'
              '}}</script>')
 if 'type="importmap"' not in s:
     s = re.sub(r'(<head[^>]*>)', lambda m: m.group(1) + '\n' + importmap, s, count=1)
@@ -269,7 +277,8 @@ if (!m) throw new Error('inline module script not found in index.html');
 const js = m[1]
   .replace(/import\('@revenuecat\/purchases-capacitor'\)/g, "import('./vendor/purchases-capacitor.js')")
   .replace(/import\('@capacitor-firebase\/authentication'\)/g, "import('./vendor/firebase-authentication.js')")
-  .replace(/import\('@capacitor\/preferences'\)/g, "import('./vendor/preferences.js')");
+  .replace(/import\('@capacitor\/preferences'\)/g, "import('./vendor/preferences.js')")
+  .replace(/import\('@capacitor\/local-notifications'\)/g, "import('./vendor/local-notifications.js')");
 const polyfill = "if (!Promise.allSettled) { Promise.allSettled = function (ps) { return Promise.all(Array.from(ps, function (p) { return Promise.resolve(p).then(function (value) { return { status: 'fulfilled', value: value }; }, function (reason) { return { status: 'rejected', reason: reason }; }); })); }; }\n";
 const out = transformSync(js, { target: 'chrome70', format: 'esm', loader: 'js', legalComments: 'none' }).code;
 s = s.replace(re, () => '<script type="module">\n' + polyfill + out + '</script>');

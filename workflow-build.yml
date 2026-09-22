@@ -1,0 +1,98 @@
+name: Build LogM8 Android AAB
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "versionName shown in Play (e.g. 1.5.30)"
+        required: false
+        default: "1.5.30"
+      version_code:
+        description: "versionCode (integer, must increase). Blank = 10 + run number"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build signed AAB
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Resolve version
+        run: |
+          VC="${{ github.event.inputs.version_code }}"
+          if [ -z "$VC" ]; then VC=$((10 + ${{ github.run_number }})); fi
+          VN="${{ github.event.inputs.version_name }}"
+          if [ -z "$VN" ]; then VN="1.5.30"; fi
+          echo "VERSION_CODE=$VC" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VN" >> "$GITHUB_ENV"
+          echo "versionName=$VN versionCode=$VC"
+
+      - name: Android SDK packages
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          "$SDKM" "platforms;android-36" "build-tools;36.0.0" "platform-tools" > /dev/null
+
+      - name: Build
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}   # PKCS12 keystore: key password == store password
+          RC_ANDROID_KEY: ${{ secrets.RC_ANDROID_KEY }}
+        run: bash build.sh
+
+      - name: Collect output
+        run: |
+          OUT="logm8-${VERSION_NAME}-vc${VERSION_CODE}.aab"
+          cp android/app/build/outputs/bundle/release/app-release.aab "$OUT"
+          echo "AAB_FILE=$OUT" >> "$GITHUB_ENV"
+          ls -la "$OUT"
+          sha256sum "$OUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.AAB_FILE }}
+          path: ${{ env.AAB_FILE }}
+          if-no-files-found: error
+
+      - name: Commit AAB to dist/
+        continue-on-error: true
+        run: |
+          mkdir -p dist
+          cp "$AAB_FILE" dist/
+          cp "$AAB_FILE" dist/latest.aab
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f dist   # .gitignore excludes *.aab, dist/ is the exception
+          git commit -m "Build ${VERSION_NAME} (versionCode ${VERSION_CODE}) [skip ci]"
+          git push
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: LogM8 ${{ env.VERSION_NAME }} (versionCode ${{ env.VERSION_CODE }})
+          body: |
+            Android App Bundle built from https://www.logm8.com.au/app.html
+            versionName ${{ env.VERSION_NAME }} · versionCode ${{ env.VERSION_CODE }} · run ${{ github.run_number }}
+          files: ${{ env.AAB_FILE }}
