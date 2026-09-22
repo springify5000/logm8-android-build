@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version_name:
-        description: "versionName shown in Play (e.g. 1.5.29)"
+        description: "versionName shown in Play (e.g. 1.5.30)"
         required: false
-        default: "1.5.29"
+        default: "1.5.30"
       version_code:
         description: "versionCode (integer, must increase). Blank = 10 + run number"
         required: false
@@ -40,7 +40,7 @@ jobs:
           VC="${{ github.event.inputs.version_code }}"
           if [ -z "$VC" ]; then VC=$((10 + ${{ github.run_number }})); fi
           VN="${{ github.event.inputs.version_name }}"
-          if [ -z "$VN" ]; then VN="1.5.29"; fi
+          if [ -z "$VN" ]; then VN="1.5.30"; fi
           echo "VERSION_CODE=$VC" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VN" >> "$GITHUB_ENV"
           echo "versionName=$VN versionCode=$VC"
