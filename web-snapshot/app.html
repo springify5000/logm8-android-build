@@ -14,7 +14,7 @@
 <!-- Capacitor (injected by native shell when running as app) -->
 <script>window.Capacitor = window.Capacitor || null;</script>
 <script>
-window.LOGM8_APP_CACHE_VERSION = 93;
+window.LOGM8_APP_CACHE_VERSION = 94;
 (function(){
   if (window.Capacitor || !window.fetch) return;
   const currentVersion = Number(window.LOGM8_APP_CACHE_VERSION || 0);
@@ -622,6 +622,9 @@ input::placeholder,textarea::placeholder{color:var(--muted2)}
           </div>
           <button class="action-btn blue" id="save-trip-btn" onclick="saveTrip()">
             <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg><span id="save-trip-label">Save trip</span>
+          </button>
+          <button class="action-btn" id="discard-trip-btn" onclick="discardTrip()" style="margin-top:10px;background:transparent;border:1px solid var(--b1);color:var(--muted)">
+            <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg><span>Discard trip</span>
           </button>
         </div>
       </div>
@@ -1344,7 +1347,11 @@ const REMINDER_MS = REMINDER_DAYS * 24 * 60 * 60 * 1000;
 const REMINDER_KEY_PREFIX = 'logm8_empty_logbook_reminder_';
 const ACTIVE_TRIP_KEY_PREFIX = 'logm8_active_trip_';
 const ACTIVE_TRIP_LAST_KEY = `${ACTIVE_TRIP_KEY_PREFIX}last`;
-const ACTIVE_TRIP_REMINDER_MS = 10 * 60 * 60 * 1000;
+const ACTIVE_TRIP_REMINDER_MS = 2 * 60 * 60 * 1000;      // in-app 'still running' reminder
+const ACTIVE_TRIP_AUTO_STOP_MS = 12 * 60 * 60 * 1000;    // a trip running this long is stopped automatically
+const ACTIVE_TRIP_STALE_MS = 48 * 60 * 60 * 1000;        // an unsaved draft older than this is discarded on restore
+const TRIP_NOTIFICATION_HOURS = [1, 2, 4, 8, 12];         // native reminders (Android app) after trip start
+const TRIP_NOTIFICATION_ID_BASE = 8100;
 const ACTIVE_TRIP_SAVE_MS = 1000;
 const FCM_VAPID_KEY = '';
 const WEB_PUSH_PUBLIC_KEY = 'BN7GxO9rWS8sEJro9nSMEtIMd7j4Kqpql_JYJWpMV5Rmb4PzWbkjfYBWDnixknsVK1G8GJj0Z5EROmjPU-GP3v4';
@@ -1360,8 +1367,8 @@ let logbookDetails = {
   makeModel: '',
   rego: ''
 };
-const APP_VERSION = '1.5.29';
-const APP_CACHE_VERSION = '93';
+const APP_VERSION = '1.5.30';
+const APP_CACHE_VERSION = '94';
 const SINGLE_INSTANCE_KEY = 'logm8_active_instance_v1';
 const SINGLE_INSTANCE_CHANNEL = 'logm8_single_instance_v1';
 const SINGLE_INSTANCE_TTL_MS = 30000;
@@ -6221,6 +6228,74 @@ function maybeSendActiveTripReminder() {
   }
 }
 
+// Native reminders (Android app only): scheduled by the OS, so they fire even when LogM8 is closed.
+async function getLocalNotificationsPlugin() {
+  if (!isNative()) return null;
+  try {
+    const mod = await import('@capacitor/local-notifications');
+    return mod.LocalNotifications || null;
+  } catch (e) {
+    console.warn('local notifications unavailable:', e);
+    return null;
+  }
+}
+
+function tripNotificationIds() {
+  return TRIP_NOTIFICATION_HOURS.map((_, i) => ({ id: TRIP_NOTIFICATION_ID_BASE + i }));
+}
+
+async function scheduleTripNotifications(startedAtMs) {
+  const plugin = await getLocalNotificationsPlugin();
+  if (!plugin) return;
+  try {
+    let perm = await plugin.checkPermissions();
+    if (perm.display !== 'granted') perm = await plugin.requestPermissions();
+    if (perm.display !== 'granted') return;
+    await plugin.cancel({ notifications: tripNotificationIds() });
+    const nowMs = Date.now();
+    const notifications = TRIP_NOTIFICATION_HOURS
+      .map((hours, i) => ({
+        id: TRIP_NOTIFICATION_ID_BASE + i,
+        title: 'LogM8 trip still running',
+        body: 'Your trip has been running for ' + hours + 'h. Open LogM8 and tap Stop when you arrive.',
+        schedule: { at: new Date(startedAtMs + hours * 60 * 60 * 1000), allowWhileIdle: true }
+      }))
+      .filter(n => n.schedule.at.getTime() > nowMs + 30 * 1000);
+    if (notifications.length) await plugin.schedule({ notifications });
+  } catch (e) {
+    console.warn('trip notifications:', e);
+  }
+}
+
+async function cancelTripNotifications() {
+  const plugin = await getLocalNotificationsPlugin();
+  if (!plugin) return;
+  try { await plugin.cancel({ notifications: tripNotificationIds() }); } catch (_) {}
+}
+
+// A trip nobody stopped: freeze it at the 12h mark instead of counting for days.
+function autoStopActiveTrip() {
+  if (!running) return;
+  running = false;
+  stopActiveTripTimers({ keepClock: true });
+  stopGPS();
+  secs = Math.min(secs, Math.floor(ACTIVE_TRIP_AUTO_STOP_MS / 1000));
+  manualTripEndKm = getGpsEstimatedEndKm();
+  showStoppedTripUI();
+  saveActiveTripDraft('stopped');
+  cancelTripNotifications();
+  showToast('Trip stopped automatically after 12 hours. Review it, then Save or Discard.', 7000);
+}
+
+window.discardTrip = () => {
+  if (!activeTripStartedAtMs && !getActiveTripDraft()) { resetTripUI(); return; }
+  if (!confirm('Discard this trip? It will not be saved.')) return;
+  clearActiveTripDraft();
+  resetTripUI();
+  cancelTripNotifications();
+  showToast('Trip discarded');
+};
+
 function startActiveTripTimers() {
   if (intv) clearInterval(intv);
   if (activeTripSaveTimer) clearInterval(activeTripSaveTimer);
@@ -6228,6 +6303,7 @@ function startActiveTripTimers() {
   intv = setInterval(() => {
     if (!running || !activeTripStartedAtMs) return;
     secs = Math.max(0, Math.floor((Date.now() - activeTripStartedAtMs) / 1000));
+    if (secs >= ACTIVE_TRIP_AUTO_STOP_MS / 1000) { autoStopActiveTrip(); return; }
     document.getElementById('timer').textContent = window.fmt(secs);
     document.title = `LogM8 tracking ${window.fmt(secs)}`;
   }, 1000);
@@ -6288,12 +6364,24 @@ function showStoppedTripUI() {
 function restoreActiveTripIfNeeded() {
   const draft = getActiveTripDraft();
   if (!draft || draft.uid !== currentUser?.uid || !draft.startedAtMs) return false;
-  activeTripStartedAtMs = Number(draft.startedAtMs) || Date.now();
+  const draftStartedAtMs = Number(draft.startedAtMs) || Date.now();
+  const draftAgeMs = Date.now() - draftStartedAtMs;
+  if (draftAgeMs > ACTIVE_TRIP_STALE_MS) {
+    // A draft this old is a trip nobody stopped: drop it instead of showing a days-long timer.
+    clearActiveTripDraft();
+    resetTripUI();
+    cancelTripNotifications();
+    showToast('An unsaved trip from ' + new Date(draftStartedAtMs).toLocaleDateString('en-AU') + ' was discarded (older than 2 days).', 7000);
+    return false;
+  }
+  activeTripStartedAtMs = draftStartedAtMs;
   activeTripLastReminderAtMs = Number(draft.lastReminderAtMs) || 0;
   kmStart = Number(draft.kmStart) || 0;
   gpsKm = Number(draft.gpsKm) || 0;
   manualTripEndKm = parseOdometerValue(draft.manualTripEndKm);
-  secs = Math.max(Number(draft.secs) || 0, Math.floor((Date.now() - activeTripStartedAtMs) / 1000));
+  secs = draft.status === 'stopped'
+    ? (Number(draft.secs) || 0)
+    : Math.max(Number(draft.secs) || 0, Math.floor((Date.now() - activeTripStartedAtMs) / 1000));
   purpose = draft.purpose === 'personal' ? 'personal' : 'work';
   document.getElementById('trip-desc').value = draft.desc || '';
   setPurpose(purpose);
@@ -6311,9 +6399,14 @@ function restoreActiveTripIfNeeded() {
   }
   running = true;
   lastPos = null;
+  if (draftAgeMs >= ACTIVE_TRIP_AUTO_STOP_MS) {
+    autoStopActiveTrip();
+    return true;
+  }
   showRunningTripUI();
   startActiveTripTimers();
   startGPS();
+  scheduleTripNotifications(activeTripStartedAtMs);
   showToast('Trip still active. LogM8 restored it from your last session.', 5000);
   return true;
 }
@@ -6428,8 +6521,7 @@ window.toggleTrip = async () => {
   if(!running){
     const existingDraft = getActiveTripDraft();
     if (existingDraft?.startedAtMs && existingDraft.uid === currentUser?.uid) {
-      restoreActiveTripIfNeeded();
-      return;
+      if (restoreActiveTripIfNeeded()) return;
     }
     const startInput = document.getElementById('odo-start');
     const suggestedStart = getNextOdometerStartForVehicle();
@@ -6454,6 +6546,7 @@ window.toggleTrip = async () => {
     saveActiveTripDraft('running');
     startActiveTripTimers();
     startGPS();
+    scheduleTripNotifications(activeTripStartedAtMs);
     if (notificationsEnabled() && typeof Notification !== 'undefined' && Notification.permission === 'default') {
       Notification.requestPermission().catch(() => {});
     }
@@ -6461,6 +6554,7 @@ window.toggleTrip = async () => {
     running=false;
     stopActiveTripTimers({ keepClock: true });
     stopGPS();
+    cancelTripNotifications();
     manualTripEndKm = getGpsEstimatedEndKm();
     showStoppedTripUI();
     saveActiveTripDraft('stopped');
@@ -6472,6 +6566,7 @@ window.toggleTrip = async () => {
 function resetTripUI(){
   stopActiveTripTimers();
   stopGPS();
+  cancelTripNotifications();
   running=false;
   secs=0;gpsKm=0;
   manualTripEndKm=null;
