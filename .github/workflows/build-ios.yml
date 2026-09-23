@@ -56,9 +56,25 @@ jobs:
         run: |
           if [ -z "$ASC_API_KEY_P8" ]; then echo "::error::Secret ASC_API_KEY_P8 is missing (content of AuthKey_LV2RZTJTC2.p8)"; exit 1; fi
           mkdir -p "$HOME/private_keys"
-          printf '%s\n' "$ASC_API_KEY_P8" > "$HOME/private_keys/AuthKey_LV2RZTJTC2.p8"
-          chmod 600 "$HOME/private_keys/AuthKey_LV2RZTJTC2.p8"
-          echo "ASC_KEY_PATH=$HOME/private_keys/AuthKey_LV2RZTJTC2.p8" >> "$GITHUB_ENV"
+          KEY="$HOME/private_keys/AuthKey_LV2RZTJTC2.p8"
+          # Rebuild a strict PEM: the pasted secret may carry Windows line endings, a single line or extra spaces.
+          KEY_PATH="$KEY" python3 - <<'PY'
+          import os, re, base64, sys
+          raw = os.environ['ASC_API_KEY_P8']
+          body = re.sub(r'-----\s*(BEGIN|END)[^-]*-----', '', raw)
+          body = re.sub(r'\s+', '', body)
+          try:
+              der = base64.b64decode(body, validate=True)
+          except Exception as e:
+              sys.exit('::error::ASC_API_KEY_P8 is not a valid base64 PEM body: %s' % e)
+          lines = [body[i:i + 64] for i in range(0, len(body), 64)]
+          pem = '-----BEGIN PRIVATE KEY-----\n' + '\n'.join(lines) + '\n-----END PRIVATE KEY-----\n'
+          open(os.environ['KEY_PATH'], 'w').write(pem)
+          print('API key PEM rebuilt: %d base64 chars, %d DER bytes' % (len(body), len(der)))
+          PY
+          chmod 600 "$KEY"
+          openssl pkey -in "$KEY" -noout && echo "API key parses OK"
+          echo "ASC_KEY_PATH=$KEY" >> "$GITHUB_ENV"
 
       - name: Build, archive and upload
         env:
