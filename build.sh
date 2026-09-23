@@ -287,6 +287,8 @@ console.log('   app module down-levelled for old WebViews (chrome70): ' + js.len
 JS
 cp www/index.html www/app.html   # the app links to /app.html in a few places
 echo "   web bundle: $(du -sh www | cut -f1)"
+# build-ios.sh reuses steps 1-3 (same web bundle + patches) and then does the iOS-specific work.
+if [ "${WEB_ONLY:-}" = "1" ]; then echo "== WEB_ONLY=1, web bundle ready in www/ (no Android project)"; exit 0; fi
 
 echo "== 4/6 Capacitor Android project"
 rm -rf android

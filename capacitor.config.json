@@ -14,12 +14,33 @@
     "FirebaseAuthentication": {
       "skipNativeAuth": true,
       "providers": [
-        "google.com"
+        "google.com",
+        "apple.com"
       ]
     },
     "LocalNotifications": {
       "smallIcon": "ic_stat_logm8",
       "iconColor": "#7CFF3D"
+    }
+  },
+  "ios": {
+    "backgroundColor": "#0a0a0a"
+  },
+  "experimental": {
+    "ios": {
+      "spm": {
+        "swiftToolsVersion": "6.1",
+        "packageTraits": {
+          "@capacitor-firebase/authentication": [
+            "Google"
+          ]
+        },
+        "packageOptions": {
+          "@capacitor-firebase/authentication": {
+            "symlink": true
+          }
+        }
+      }
     }
   }
 }

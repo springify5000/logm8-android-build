@@ -8,3 +8,7 @@ keystore.properties
 
 # Personal data: tester emails stay local (only tester-hashes.txt is committed)
 tester-emails.txt
+
+# iOS project is generated at build time by build-ios.sh
+ios/
+build/
