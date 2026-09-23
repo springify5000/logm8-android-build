@@ -191,6 +191,9 @@ AUTH=()
 if [ -n "${ASC_KEY_PATH:-}" ]; then
   AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$ASC_KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
   echo "   signing: Xcode automatic (cloud) signing with App Store Connect API key $ASC_KEY_ID"
+  # Automatic signing needs a development profile for the archive step, which Apple only issues
+  # when the team has at least one registered device (the export step re-signs for the App Store).
+  ASC_KEY_PATH="$ASC_KEY_PATH" ASC_KEY_ID="$ASC_KEY_ID" ASC_ISSUER_ID="$ASC_ISSUER_ID" node ios-overlay/asc-ensure-device.mjs
 else
   echo "   signing: no API key -> archive will fail unless certificates are installed"
 fi
