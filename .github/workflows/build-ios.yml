@@ -1,0 +1,85 @@
+name: Build LogM8 iOS (TestFlight)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "Version shown in the App Store (e.g. 1.5.30)"
+        required: false
+        default: "1.5.30"
+      build_number:
+        description: "Build number (integer, must increase per upload). Blank = run number"
+        required: false
+        default: ""
+      upload:
+        description: "Upload to App Store Connect / TestFlight"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Archive and upload
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Tooling
+        run: |
+          xcode-select -p
+          xcodebuild -version
+          python3 --version
+
+      - name: Resolve version
+        run: |
+          BN="${{ github.event.inputs.build_number }}"
+          if [ -z "$BN" ]; then BN="${{ github.run_number }}"; fi
+          VN="${{ github.event.inputs.version_name }}"
+          if [ -z "$VN" ]; then VN="1.5.30"; fi
+          echo "BUILD_NUMBER=$BN" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VN" >> "$GITHUB_ENV"
+          echo "version=$VN build=$BN"
+
+      - name: App Store Connect API key
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          if [ -z "$ASC_API_KEY_P8" ]; then echo "::error::Secret ASC_API_KEY_P8 is missing (content of AuthKey_LV2RZTJTC2.p8)"; exit 1; fi
+          mkdir -p "$HOME/private_keys"
+          printf '%s\n' "$ASC_API_KEY_P8" > "$HOME/private_keys/AuthKey_LV2RZTJTC2.p8"
+          chmod 600 "$HOME/private_keys/AuthKey_LV2RZTJTC2.p8"
+          echo "ASC_KEY_PATH=$HOME/private_keys/AuthKey_LV2RZTJTC2.p8" >> "$GITHUB_ENV"
+
+      - name: Build, archive and upload
+        env:
+          ASC_KEY_ID: LV2RZTJTC2
+          ASC_ISSUER_ID: 943eea3e-92c5-46e4-b6db-432476be023e
+          RC_IOS_KEY: ${{ secrets.RC_IOS_KEY }}
+          SKIP_UPLOAD: ${{ github.event.inputs.upload == 'false' && '1' || '' }}
+        run: |
+          if [ "$SKIP_UPLOAD" = "1" ]; then
+            sed -i '' 's#<string>upload</string>#<string>export</string>#' ios-overlay/ExportOptions.plist
+          fi
+          bash build-ios.sh
+
+      - name: Upload logs and IPA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-${{ github.run_number }}
+          path: |
+            build/archive.log
+            build/export.log
+            build/export/*.ipa
+            build/export/*.plist
+          if-no-files-found: ignore
