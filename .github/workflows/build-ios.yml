@@ -80,7 +80,9 @@ jobs:
         env:
           ASC_KEY_ID: LV2RZTJTC2
           ASC_ISSUER_ID: 943eea3e-92c5-46e4-b6db-432476be023e
-          RC_IOS_KEY: ${{ secrets.RC_IOS_KEY }}
+          # RevenueCat *public* SDK key for the App Store app (safe to ship - it is embedded in the app anyway);
+          # a RC_IOS_KEY repository secret overrides it.
+          RC_IOS_KEY: ${{ secrets.RC_IOS_KEY || 'appl_GTUojvLmYqgxcumfpFmMkmSiSPl' }}
           SKIP_UPLOAD: ${{ github.event.inputs.upload == 'false' && '1' || '' }}
         run: |
           if [ "$SKIP_UPLOAD" = "1" ]; then
