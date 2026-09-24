@@ -207,45 +207,8 @@ else:
         print('   widget auth bridge applied')
     else:
         raise SystemExit('ERROR: widget auth bridge patch failed')
-# --- closed-testing tester allowlist (tester-hashes.txt) ---
-# Testers get the app's demo/test tier (never trial-locked, Pro features) so they can test
-# for months without paying. Only SHA-256 hashes of the tester emails ship in the build
-# (hash-testers.sh turns the local, uncommitted tester-emails.txt into tester-hashes.txt).
-hashes = []
-if os.path.exists('tester-hashes.txt'):
-    for line in open('tester-hashes.txt', encoding='utf-8'):
-        h = line.split('#', 1)[0].strip().lower()
-        if re.fullmatch(r'[0-9a-f]{64}', h) and h not in hashes:
-            hashes.append(h)
-if 'TESTER_EMAIL_HASHES' in s:
-    print('   tester allowlist already present in app.html')
-else:
-    hash_list = ', '.join("'" + h + "'" for h in hashes)
-    tester_code = (
-        "// Closed-testing allowlist (Android build only): SHA-256 hashes of tester emails.\n"
-        "// Matching users get the demo/test tier with Pro features and are never trial-locked.\n"
-        "const TESTER_EMAIL_HASHES = new Set([" + hash_list + "]);\n"
-        "let currentUserIsTester = false;\n"
-        "async function refreshTesterFlag(user) {\n"
-        "  currentUserIsTester = false;\n"
-        "  try {\n"
-        "    const email = String(user?.email || '').trim().toLowerCase();\n"
-        "    if (!email || !TESTER_EMAIL_HASHES.size || !window.crypto?.subtle) return;\n"
-        "    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(email));\n"
-        "    const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');\n"
-        "    currentUserIsTester = TESTER_EMAIL_HASHES.has(hex);\n"
-        "  } catch (e) { console.warn('tester allowlist check:', e); }\n"
-        "}\n"
-        "const DEMO_TIER_BY_EMAIL = {"
-    )
-    s, t1 = re.subn(r"const\s+DEMO_TIER_BY_EMAIL\s*=\s*\{", lambda m: tester_code, s, count=1)
-    s, t2 = re.subn(r"(function getDemoTierOverride\(\) \{)", r"\1\n  if (currentUserIsTester) return 'test';", s, count=1)
-    s, t3 = re.subn(r"(function getDemoAccessOverride\(\) \{)", r"\1\n  if (currentUserIsTester) return 'pro';", s, count=1)
-    s, t4 = re.subn(r"(resetAuthButtons\(\);\s*currentUser = user;)", r"\1\n    await refreshTesterFlag(user);", s, count=1)
-    if t1 == 1 and t2 == 1 and t3 == 1 and t4 == 1:
-        print(f'   tester allowlist applied: {len(hashes)} email hashes')
-    else:
-        raise SystemExit(f'ERROR: tester allowlist patch failed (const={t1} tier={t2} access={t3} hook={t4}) - app.html changed?')
+# --- closed-testing testers: granted SERVER-SIDE now (functions TESTER_EMAIL_HASHES ->
+# subscription plan "tester_forever"), so no email hashes ship in the app or this public repo.
 
 # --- avatar fallback: Google profile photos can fail to load inside the WebView (broken "avatar"
 # alt text). Send no referrer and fall back to the initial letter on error. Idempotent.
@@ -319,6 +282,27 @@ else:
         print('   native purchase UI patch applied (store prices, Basic only, Terms/Privacy links, package lookup fix)')
     else:
         raise SystemExit(f'ERROR: native purchase UI patch failed (consts={p1} prices={p2} legal={p3} legal2={p4} modal={p5} lookup={p6} css={p7}) - app.html changed?')
+
+# --- RevenueCat identity: purchases must belong to the Firebase uid, otherwise the backend
+# (refreshMySubscription / revenueCatWebhook) can never see a Google Play / App Store purchase. Idempotent.
+if 'async function rcIdentify()' not in s:
+    ident = (
+        "// RevenueCat app_user_id = Firebase uid, so the server can verify store purchases.\n"
+        "async function rcIdentify() {\n"
+        "  if (!rcPurchases || !currentUser?.uid) return;\n"
+        "  try { await rcPurchases.logIn({ appUserID: currentUser.uid }); }\n"
+        "  catch (e) { console.warn('RevenueCat logIn failed:', e); }\n"
+        "}\n"
+    )
+    s, r1 = re.subn(r"(let rcPurchases = null;[^\n]*\n)", lambda m: m.group(1) + ident, s, count=1)
+    s, r2 = re.subn(r"(console\.log\('RevenueCat configured'\);)", r"\1\n    rcIdentify().catch(() => null);", s, count=1)
+    s, r3 = re.subn(r"(\n(\s*)const \{ customerInfo \} = await rcPurchases\.purchasePackage\()", lambda m: "\n" + m.group(2) + "await rcIdentify();" + m.group(1), s, count=1)
+    s, r4 = re.subn(r"(\n(\s*)const \{ customerInfo \} = await rcPurchases\.restorePurchases\(\))", lambda m: "\n" + m.group(2) + "await rcIdentify();" + m.group(1), s, count=1)
+    s, r5 = re.subn(r"(resetAuthButtons\(\);\s*currentUser = user;)", r"\1\n    rcIdentify().catch(() => null);", s, count=1)
+    if r1 == r2 == r3 == r4 == r5 == 1:
+        print('   RevenueCat identity patch applied')
+    else:
+        raise SystemExit(f'ERROR: RevenueCat identity patch failed (decl={r1} cfg={r2} buy={r3} restore={r4} auth={r5}) - app.html changed?')
 
 key = os.environ.get('RC_ANDROID_KEY', '').strip()
 pat = r"(const\s+RC_ANDROID_KEY\s*=\s*)'YOUR_REVENUECAT_ANDROID_KEY'"

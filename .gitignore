@@ -12,3 +12,6 @@ tester-emails.txt
 # iOS project is generated at build time by build-ios.sh
 ios/
 build/
+
+# Tester email hashes now live in the Firebase functions config (TESTER_EMAIL_HASHES)
+tester-hashes.txt
