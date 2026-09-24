@@ -75,20 +75,8 @@ jobs:
           path: ${{ env.AAB_FILE }}
           if-no-files-found: error
 
-      - name: Commit AAB to dist/
-        continue-on-error: true
-        run: |
-          mkdir -p dist
-          cp "$AAB_FILE" dist/
-          cp "$AAB_FILE" dist/latest.aab
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f dist   # .gitignore excludes *.aab, dist/ is the exception
-          git commit -m "Build ${VERSION_NAME} (versionCode ${VERSION_CODE}) [skip ci]"
-          git push
-
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: build-${{ github.run_number }}
           name: LogM8 ${{ env.VERSION_NAME }} (versionCode ${{ env.VERSION_CODE }})
