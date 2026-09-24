@@ -253,6 +253,72 @@ if 'referrerpolicy="no-referrer"' not in s:
                       '<img src="${photo}" alt="avatar" referrerpolicy="no-referrer" onerror="this.parentNode.textContent=\'${initial}\'"/>', s)
     print(f'   avatar fallback applied ({n_av} places)')
 
+# --- native purchase UI (both stores): prices come from the store (RevenueCat offerings), the modal
+# sells the Basic tier only (there are no native Pro products), no Stripe wording, and the legal line
+# carries Terms/Privacy links (App Store rule 3.1.2). Also fixes the package lookup: on Google Play
+# RevenueCat product identifiers are "productId:basePlanId", so the exact match never hit and the
+# code silently fell back to the FIRST package whatever plan the user picked. Idempotent.
+if 'NATIVE_STORE_PRICES' in s:
+    print('   native purchase UI patch already present')
+else:
+    consts = (
+        "const RC_PRODUCT_ANNUAL  = 'logm8_basic_annual';\n"
+        "// Native purchase UI: the store's own prices, Basic tier only (no native Pro products), no Stripe wording.\n"
+        "const NATIVE_STORE_NAME = 'Google Play';\n"
+        "const NATIVE_TERMS_URL = '';\n"
+        "const NATIVE_PRIVACY_URL = 'https://www.logm8.com.au/privacy.html';\n"
+        "const NATIVE_STORE_PRICES = {};\n"
+        "function nativeLegalHtml() {\n"
+        "  const links = [];\n"
+        "  if (NATIVE_TERMS_URL) links.push('<a href=\"' + NATIVE_TERMS_URL + '\" target=\"_blank\" rel=\"noopener\">Terms of Use</a>');\n"
+        "  links.push('<a href=\"' + NATIVE_PRIVACY_URL + '\" target=\"_blank\" rel=\"noopener\">Privacy Policy</a>');\n"
+        "  return 'Subscription managed by ' + NATIVE_STORE_NAME + ' - Cancel anytime \\u00b7 ' + links.join(' \\u00b7 ');\n"
+        "}\n"
+        "function applyNativeStorePrices(offerings) {\n"
+        "  const pkgs = offerings?.current?.availablePackages || [];\n"
+        "  for (const pkg of pkgs) {\n"
+        "    const id = String(pkg?.product?.identifier || '').split(':')[0];\n"
+        "    const price = pkg?.product?.priceString || '';\n"
+        "    if (!price) continue;\n"
+        "    if (id === RC_PRODUCT_WEEKLY) NATIVE_STORE_PRICES.weekly = price;\n"
+        "    else if (id === RC_PRODUCT_MONTHLY) NATIVE_STORE_PRICES.monthly = price;\n"
+        "    else if (id === RC_PRODUCT_ANNUAL) NATIVE_STORE_PRICES.annual = price;\n"
+        "  }\n"
+        "}\n"
+    )
+    s, p1 = re.subn(r"const RC_PRODUCT_ANNUAL\s*=\s*'logm8_basic_annual';\n", lambda m: consts, s, count=1)
+    price_pat = (r"  document\.getElementById\('price-weekly'\)\.textContent = PLAN_DISPLAY\[selectedTier\]\.weekly\.price;\n"
+                 r"  document\.getElementById\('price-monthly'\)\.textContent = PLAN_DISPLAY\[selectedTier\]\.monthly\.price;\n"
+                 r"  document\.getElementById\('price-annual'\)\.textContent = PLAN_DISPLAY\[selectedTier\]\.annual\.price;\n")
+    price_new = (
+        "  const priceOf = (k, unit) => (isNative() && NATIVE_STORE_PRICES[k]) ? NATIVE_STORE_PRICES[k] + ' / ' + unit : PLAN_DISPLAY[selectedTier][k].price;\n"
+        "  document.getElementById('price-weekly').textContent = priceOf('weekly', 'wk');\n"
+        "  document.getElementById('price-monthly').textContent = priceOf('monthly', 'mo');\n"
+        "  document.getElementById('price-annual').textContent = priceOf('annual', 'yr');\n"
+    )
+    s, p2 = re.subn(price_pat, lambda m: price_new, s, count=1)
+    s, p3 = re.subn(r"  if \(legal\) legal\.textContent = display\.legal;\n",
+                    "  if (legal) { if (isNative()) legal.innerHTML = nativeLegalHtml(); else legal.textContent = display.legal; }\n", s, count=1)
+    s, p4 = re.subn(r"legal\.textContent = 'Subscription managed by Google Play - Cancel anytime';",
+                    "legal.innerHTML = nativeLegalHtml();", s, count=1)
+    native_ui = (
+        "    applyNativeStorePrices(offerings);\n"
+        "    selectedTier = 'basic';\n"
+        "    document.querySelector('.tier-toggle')?.style.setProperty('display', 'none');\n"
+        "    document.getElementById('plan-highlight')?.style.setProperty('display', 'none');\n"
+        "    document.querySelector('.trial-strip')?.style.setProperty('display', 'none');\n"
+        "    syncSelectedPlanUI(selectedPlan, 'basic');\n"
+    )
+    s, p5 = re.subn(r"(if \(!offerings\.current\) \{ showToast\('No plans available'\); return; \}\n)",
+                    lambda m: m.group(1) + native_ui, s, count=1)
+    s, p6 = re.subn(r"p\.product\?\.identifier === productId\n\s*\) \|\| offerings\.current\?\.availablePackages\?\.\[0\];",
+                    "String(p.product?.identifier || '').split(':')[0] === productId\n    );", s, count=1)
+    s, p7 = re.subn(r"(\.upgrade-legal\{[^}]*\})", r"\1.upgrade-legal a{color:inherit;text-decoration:underline}", s, count=1)
+    if p1 == p2 == p3 == p4 == p5 == p6 == p7 == 1:
+        print('   native purchase UI patch applied (store prices, Basic only, Terms/Privacy links, package lookup fix)')
+    else:
+        raise SystemExit(f'ERROR: native purchase UI patch failed (consts={p1} prices={p2} legal={p3} legal2={p4} modal={p5} lookup={p6} css={p7}) - app.html changed?')
+
 key = os.environ.get('RC_ANDROID_KEY', '').strip()
 pat = r"(const\s+RC_ANDROID_KEY\s*=\s*)'YOUR_REVENUECAT_ANDROID_KEY'"
 if key.startswith('goog_'):

@@ -54,6 +54,14 @@ for a, b in [
         n_words += s.count(q + a + q)
         s = s.replace(q + a + q, q + b + q)
 print('   App Store wording applied (%d strings)' % n_words)
+# Native purchase UI constants set by build.sh (store name shown in the modal, Terms link required by
+# App Store rule 3.1.2 - Apple's standard EULA is acceptable when the app has no custom terms page).
+s, n_store = re.subn(r"(const\s+NATIVE_STORE_NAME\s*=\s*)['\"]Google Play['\"]", lambda m: m.group(1) + '"the App Store"', s, count=1)
+s, n_terms = re.subn(r"(const\s+NATIVE_TERMS_URL\s*=\s*)['\"]['\"]", lambda m: m.group(1) + '"https://www.apple.com/legal/internet-services/itunes/dev/stdeula/"', s, count=1)
+if n_store == 1 and n_terms == 1:
+    print('   native purchase UI: store name + Terms of Use link set for iOS')
+else:
+    raise SystemExit(f'ERROR: native purchase UI constants not found (store={n_store} terms={n_terms}) - build.sh patch missing?')
 
 # --- Sign in with Apple (App Store rule 4.8: an app that offers Google sign-in must offer Apple sign-in) ---
 if 'signInApple' in s:
