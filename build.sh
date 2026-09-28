@@ -128,6 +128,22 @@ npx esbuild node_modules/@capacitor/preferences/dist/esm/index.js \
 npx esbuild node_modules/@capacitor/local-notifications/dist/esm/index.js \
   --bundle --format=esm --platform=browser --target=chrome70 --log-level=warning \
   --outfile=www/vendor/local-notifications.js
+# Firebase JS SDK shipped inside the app. The web app imports it from www.gstatic.com at every
+# launch (8 module downloads, ~1 MB): slow start on a weak connection and a loading screen that
+# never goes away when any of them fails. Same version as the web app (read from app.html), bundled
+# with code splitting so all modules share one @firebase/app instance. Installed for the build only:
+# @capacitor-firebase/authentication declares an (optional, unused) peer on a newer firebase major,
+# so it cannot live in package.json without --legacy-peer-deps everywhere.
+FIREBASE_VERSION="$(grep -o 'firebasejs/[0-9][0-9.]*/firebase-app\.js' www/index.html | head -1 | cut -d/ -f2)"
+FIREBASE_VERSION="${FIREBASE_VERSION:-10.12.0}"
+FIREBASE_MODULES="$(grep -o 'firebasejs/[0-9.]*/firebase-[a-z-]*\.js' www/index.html | sed 's#.*/firebase-##; s#\.js$##' | sort -u | tr '\n' ' ')"
+[ -n "$FIREBASE_MODULES" ] || FIREBASE_MODULES="app auth firestore functions storage remote-config analytics messaging"
+npm install --no-save --no-audit --no-fund --legacy-peer-deps "firebase@$FIREBASE_VERSION"
+rm -rf build/firebase-entries www/vendor/firebase && mkdir -p build/firebase-entries
+for m in $FIREBASE_MODULES; do echo "export * from 'firebase/$m';" > "build/firebase-entries/firebase-$m.js"; done
+npx esbuild build/firebase-entries/firebase-*.js --bundle --splitting --minify --format=esm \
+  --platform=browser --target=chrome70 --log-level=warning --outdir=www/vendor/firebase
+echo "   Firebase $FIREBASE_VERSION bundled ($FIREBASE_MODULES): $(du -sh www/vendor/firebase | cut -f1)"
 RC_ANDROID_KEY="${RC_ANDROID_KEY:-}" python3 - <<'PY'
 import os, re
 p = 'www/index.html'
@@ -141,6 +157,140 @@ importmap = ('<script type="importmap">{"imports":{'
 if 'type="importmap"' not in s:
     s = re.sub(r'(<head[^>]*>)', lambda m: m.group(1) + '\n' + importmap, s, count=1)
     print('   import map injected')
+
+# ===== app start-up (both stores) =====
+# --- Firebase from the app bundle instead of www.gstatic.com (bundled in step 3 above) ---
+fb_pat = r"https://www\.gstatic\.com/firebasejs/[0-9.]+/firebase-([a-z-]+)\.js"
+fb_mods = sorted(set(re.findall(fb_pat, s)))
+if fb_mods:
+    missing = [m for m in fb_mods if not os.path.exists('www/vendor/firebase/firebase-%s.js' % m)]
+    if missing:
+        raise SystemExit('ERROR: Firebase modules imported by app.html but not bundled: %s' % ' '.join(missing))
+    s, n_fb = re.subn(fb_pat, r"./vendor/firebase/firebase-\1.js", s)
+    print('   Firebase imports -> bundled copy (%d imports: %s)' % (n_fb, ' '.join(fb_mods)))
+else:
+    print('   Firebase imports already local')
+
+# --- Google Fonts must not block the first paint: the loading screen shows at once and the font
+# swaps in when the stylesheet arrives (media="print" + onload is the standard non-blocking trick) ---
+if 'fonts.googleapis.com' in s and 'media="print" onload=' not in s:
+    s, n_font = re.subn(r'(<link href="https://fonts\.googleapis\.com/css2[^"]*" rel="stylesheet")(\s*/?>)',
+                        lambda m: m.group(1) + ' media="print" onload="this.media=\'all\'"' + m.group(2), s, count=1)
+    print('   Google Fonts stylesheet made non-blocking' if n_font else '   WARNING: Google Fonts <link> not found')
+
+# --- Firebase Auth without the popup/redirect resolver inside the app ---
+# getAuth() wires in browserPopupRedirectResolver, and on iOS/Safari user agents that resolver
+# initialises Firebase's auth iframe (apis.google.com + <authDomain>/__/auth/iframe) proactively,
+# before auth is declared ready. Inside the iOS WebView (origin capacitor://localhost) that
+# handshake never completes: onAuthStateChanged never fires and the app sits on the loading
+# screen forever. The app never uses popup/redirect sign-in natively (Google and Apple go through
+# the native plugin), so the resolver is left out. Same localStorage persistence the web app forces.
+if 'IS_NATIVE_APP' in s:
+    print('   native auth init already present')
+else:
+    s, a1 = re.subn(r"import \{ getAuth, onAuthStateChanged,", "import { getAuth, initializeAuth, onAuthStateChanged,", s, count=1)
+    native_auth = (
+        "const IS_NATIVE_APP = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());\n"
+        "const auth = IS_NATIVE_APP ? initializeAuth(app, { persistence: browserLocalPersistence }) : getAuth(app);\n"
+        "if (window.__logm8Startup) window.__logm8Startup.mark('sdk');\n"
+    )
+    s, a2 = re.subn(r"const auth = getAuth\(app\);\n", lambda m: native_auth, s, count=1)
+    s, a3 = re.subn(r"authPersistenceReady\.then\(\(\) => getRedirectResult\(auth\)\)",
+                    "authPersistenceReady.then(() => IS_NATIVE_APP ? null : getRedirectResult(auth))", s, count=1)
+    if a1 == a2 == a3 == 1:
+        print('   native auth init applied (initializeAuth, no popup/redirect resolver)')
+    else:
+        raise SystemExit(f'ERROR: native auth init patch failed (import={a1} init={a2} redirect={a3}) - app.html changed?')
+
+# --- the single-instance guard is for browser tabs. In the app it only misfires: the OS kills the
+# WebView without pagehide, and the stale localStorage record then blocks the next launch (up to
+# 30 s) with "LogM8 is already open" ---
+if 'if (isNative()) return true; // one instance per app' in s:
+    print('   single-instance guard already skipped in the app')
+else:
+    s, g1 = re.subn(r"function initSingleInstanceGuard\(\) \{\n",
+                    "function initSingleInstanceGuard() {\n  if (isNative()) return true; // one instance per app\n", s, count=1)
+    if g1 == 1:
+        print('   single-instance guard skipped in the app')
+    else:
+        raise SystemExit('ERROR: initSingleInstanceGuard not found - app.html changed?')
+
+# --- keep the loading screen until the maintenance check answers (it used to disappear first,
+# leaving a black screen while Remote Config was fetched), and cap that wait at 4 s ---
+if 'STARTUP_MAINTENANCE_WAIT_MS' in s:
+    print('   loading screen sequencing already present')
+else:
+    old_seq = (r"  if \(singleInstanceBlocked\) return;\n"
+               r"  document\.getElementById\('loading'\)\.style\.display = 'none';\n"
+               r"  const isInMaintenance = await checkMaintenanceMode\(\);\n")
+    new_seq = (
+        "  if (singleInstanceBlocked) return;\n"
+        "  if (window.__logm8Startup) window.__logm8Startup.mark('auth');\n"
+        "  const STARTUP_MAINTENANCE_WAIT_MS = 4000;\n"
+        "  const isInMaintenance = await Promise.race([checkMaintenanceMode(), new Promise((resolve) => setTimeout(() => resolve(false), STARTUP_MAINTENANCE_WAIT_MS))]);\n"
+        "  document.getElementById('loading').style.display = 'none';\n"
+    )
+    s, q1 = re.subn(old_seq, lambda m: new_seq, s, count=1)
+    if q1 == 1:
+        print('   loading screen kept until the maintenance check answers (max 4 s)')
+    else:
+        raise SystemExit('ERROR: onAuthStateChanged start sequence not found - app.html changed?')
+
+# --- start-up diagnostics: if the loading screen is still there after 8 s, say what happened
+# (where start-up got to, script errors, OS version) and offer a retry. Invisible otherwise. ---
+if "box.id = 'logm8-startup-diag'" not in s:
+    diag = r"""<script>
+(function () {
+  var t0 = Date.now(), errors = [], marks = [], box = null;
+  function tail(u) { return String(u || '').split('?')[0].split('/').slice(-1)[0]; }
+  window.addEventListener('error', function (e) {
+    var t = e && e.target, msg;
+    if (e && e.message) msg = String(e.message);
+    else if (t && t.tagName === 'SCRIPT' && !t.src) msg = 'app module failed to load (import error)';
+    else if (t && t.tagName) msg = 'failed to load ' + (tail(t.src || t.href) || t.tagName.toLowerCase());
+    else msg = 'error';
+    if (e && e.filename) msg += ' (' + tail(e.filename) + ':' + e.lineno + ')';
+    if (errors.length < 5) errors.push(msg);
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason;
+    if (errors.length < 5) errors.push('unhandled: ' + (r && (r.code || r.message) ? (r.code || r.message) : String(r)));
+  });
+  function show() {
+    var loading = document.getElementById('loading');
+    if (!document.body || !loading || loading.style.display === 'none') {
+      if (box && box.parentNode) box.parentNode.removeChild(box);
+      box = null;
+      return;
+    }
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'logm8-startup-diag';
+      box.style.cssText = 'position:fixed;left:16px;right:16px;bottom:calc(28px + env(safe-area-inset-bottom,0px));z-index:2001;font:12px/1.5 -apple-system,system-ui,sans-serif;color:#8a8a8a;text-align:center;white-space:pre-wrap;word-break:break-word';
+      document.body.appendChild(box);
+    }
+    var ua = navigator.userAgent || '';
+    var os = (ua.match(/(?:iPhone|CPU) OS (\d+[_.]\d+)/) || [])[1];
+    os = os ? 'iOS ' + os.replace('_', '.') : ((ua.match(/Android [\d.]+/) || [])[0] || '');
+    var secs = Math.round((Date.now() - t0) / 1000);
+    var lines = ['Still loading after ' + secs + 's' + (marks.length ? ' (' + marks.join(', ') + ')' : ' (app module did not start)') + (os ? ' · ' + os : '')];
+    box.textContent = lines.concat(errors).join('\n') + '\n';
+    var a = document.createElement('a');
+    a.textContent = 'Tap to retry';
+    a.href = '#';
+    a.style.cssText = 'color:#7fff4a;text-decoration:underline';
+    a.onclick = function (ev) { ev.preventDefault(); location.reload(); };
+    box.appendChild(a);
+  }
+  window.__logm8Startup = { mark: function (m) { marks.push(m + ' ' + ((Date.now() - t0) / 1000).toFixed(1) + 's'); } };
+  setTimeout(function tick() { show(); setTimeout(tick, 4000); }, 8000);
+})();
+</script>"""
+    s, d1 = re.subn(r'(<meta charset="UTF-8"\s*/?>)', lambda m: m.group(1) + '\n' + diag, s, count=1)
+    if d1 == 1:
+        print('   start-up diagnostics injected')
+    else:
+        raise SystemExit('ERROR: <meta charset> not found - app.html changed?')
 
 # --- native Google Sign-In patch (no-op if the app already ships nativeGoogleSignIn) ---
 if 'nativeGoogleSignIn' in s:
@@ -191,8 +341,7 @@ else:
         "  onAuthStateChanged(auth, async (widgetUser) => {\n"
         "    try {\n"
         "      const { Preferences } = await import('@capacitor/preferences');\n"
-        "      // Only the owner account keeps a token for the widget; everyone else is cleared.\n"
-        "      if (widgetUser && widgetUser.refreshToken && typeof isOwnerAdmin === 'function' && isOwnerAdmin(widgetUser.email)) {\n"
+        "      if (widgetUser && widgetUser.refreshToken) {\n"
         "        await Preferences.set({ key: 'logm8_widget_auth', value: JSON.stringify({ uid: widgetUser.uid, email: widgetUser.email || '', refreshToken: widgetUser.refreshToken, savedAtMs: Date.now() }) });\n"
         "      } else {\n"
         "        await Preferences.remove({ key: 'logm8_widget_auth' });\n"
@@ -207,8 +356,45 @@ else:
         print('   widget auth bridge applied')
     else:
         raise SystemExit('ERROR: widget auth bridge patch failed')
-# --- closed-testing testers: granted SERVER-SIDE now (functions TESTER_EMAIL_HASHES ->
-# subscription plan "tester_forever"), so no email hashes ship in the app or this public repo.
+# --- closed-testing tester allowlist (tester-hashes.txt) ---
+# Testers get the app's demo/test tier (never trial-locked, Pro features) so they can test
+# for months without paying. Only SHA-256 hashes of the tester emails ship in the build
+# (hash-testers.sh turns the local, uncommitted tester-emails.txt into tester-hashes.txt).
+hashes = []
+if os.path.exists('tester-hashes.txt'):
+    for line in open('tester-hashes.txt', encoding='utf-8'):
+        h = line.split('#', 1)[0].strip().lower()
+        if re.fullmatch(r'[0-9a-f]{64}', h) and h not in hashes:
+            hashes.append(h)
+if 'TESTER_EMAIL_HASHES' in s:
+    print('   tester allowlist already present in app.html')
+else:
+    hash_list = ', '.join("'" + h + "'" for h in hashes)
+    tester_code = (
+        "// Closed-testing allowlist (Android build only): SHA-256 hashes of tester emails.\n"
+        "// Matching users get the demo/test tier with Pro features and are never trial-locked.\n"
+        "const TESTER_EMAIL_HASHES = new Set([" + hash_list + "]);\n"
+        "let currentUserIsTester = false;\n"
+        "async function refreshTesterFlag(user) {\n"
+        "  currentUserIsTester = false;\n"
+        "  try {\n"
+        "    const email = String(user?.email || '').trim().toLowerCase();\n"
+        "    if (!email || !TESTER_EMAIL_HASHES.size || !window.crypto?.subtle) return;\n"
+        "    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(email));\n"
+        "    const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');\n"
+        "    currentUserIsTester = TESTER_EMAIL_HASHES.has(hex);\n"
+        "  } catch (e) { console.warn('tester allowlist check:', e); }\n"
+        "}\n"
+        "const DEMO_TIER_BY_EMAIL = {"
+    )
+    s, t1 = re.subn(r"const\s+DEMO_TIER_BY_EMAIL\s*=\s*\{", lambda m: tester_code, s, count=1)
+    s, t2 = re.subn(r"(function getDemoTierOverride\(\) \{)", r"\1\n  if (currentUserIsTester) return 'test';", s, count=1)
+    s, t3 = re.subn(r"(function getDemoAccessOverride\(\) \{)", r"\1\n  if (currentUserIsTester) return 'pro';", s, count=1)
+    s, t4 = re.subn(r"(resetAuthButtons\(\);\s*currentUser = user;)", r"\1\n    await refreshTesterFlag(user);", s, count=1)
+    if t1 == 1 and t2 == 1 and t3 == 1 and t4 == 1:
+        print(f'   tester allowlist applied: {len(hashes)} email hashes')
+    else:
+        raise SystemExit(f'ERROR: tester allowlist patch failed (const={t1} tier={t2} access={t3} hook={t4}) - app.html changed?')
 
 # --- avatar fallback: Google profile photos can fail to load inside the WebView (broken "avatar"
 # alt text). Send no referrer and fall back to the initial letter on error. Idempotent.
@@ -282,27 +468,6 @@ else:
         print('   native purchase UI patch applied (store prices, Basic only, Terms/Privacy links, package lookup fix)')
     else:
         raise SystemExit(f'ERROR: native purchase UI patch failed (consts={p1} prices={p2} legal={p3} legal2={p4} modal={p5} lookup={p6} css={p7}) - app.html changed?')
-
-# --- RevenueCat identity: purchases must belong to the Firebase uid, otherwise the backend
-# (refreshMySubscription / revenueCatWebhook) can never see a Google Play / App Store purchase. Idempotent.
-if 'async function rcIdentify()' not in s:
-    ident = (
-        "// RevenueCat app_user_id = Firebase uid, so the server can verify store purchases.\n"
-        "async function rcIdentify() {\n"
-        "  if (!rcPurchases || !currentUser?.uid) return;\n"
-        "  try { await rcPurchases.logIn({ appUserID: currentUser.uid }); }\n"
-        "  catch (e) { console.warn('RevenueCat logIn failed:', e); }\n"
-        "}\n"
-    )
-    s, r1 = re.subn(r"(let rcPurchases = null;[^\n]*\n)", lambda m: m.group(1) + ident, s, count=1)
-    s, r2 = re.subn(r"(console\.log\('RevenueCat configured'\);)", r"\1\n    rcIdentify().catch(() => null);", s, count=1)
-    s, r3 = re.subn(r"(\n(\s*)const \{ customerInfo \} = await rcPurchases\.purchasePackage\()", lambda m: "\n" + m.group(2) + "await rcIdentify();" + m.group(1), s, count=1)
-    s, r4 = re.subn(r"(\n(\s*)const \{ customerInfo \} = await rcPurchases\.restorePurchases\(\))", lambda m: "\n" + m.group(2) + "await rcIdentify();" + m.group(1), s, count=1)
-    s, r5 = re.subn(r"(resetAuthButtons\(\);\s*currentUser = user;)", r"\1\n    rcIdentify().catch(() => null);", s, count=1)
-    if r1 == r2 == r3 == r4 == r5 == 1:
-        print('   RevenueCat identity patch applied')
-    else:
-        raise SystemExit(f'ERROR: RevenueCat identity patch failed (decl={r1} cfg={r2} buy={r3} restore={r4} auth={r5}) - app.html changed?')
 
 key = os.environ.get('RC_ANDROID_KEY', '').strip()
 pat = r"(const\s+RC_ANDROID_KEY\s*=\s*)'YOUR_REVENUECAT_ANDROID_KEY'"
