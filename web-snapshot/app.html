@@ -5262,7 +5262,7 @@ window.exportPDF = async (options = {}) => {
     downloadBlob(blob, options.filename || 'logm8_logbook_report.pdf');
     recordUserActivity('pdf_exported');
     trackEvent('export_logbook', { format: 'pdf' });
-    showToast('PDF report downloaded');
+    showToast(isNative() ? 'Choose where to save your file' : 'PDF report downloaded');
     return blob;
   } catch (err) {
     console.error('PDF export failed:', err);
@@ -5272,7 +5272,36 @@ window.exportPDF = async (options = {}) => {
   }
 };
 
+// Inside the Android/iOS app a blob: link with a download attribute does nothing (the WebView has
+// no download manager), so exports were silently lost. Native: write the file to the app cache and
+// open the system share sheet (save to Files/Drive/Downloads, email, WhatsApp...).
+async function saveBlobNative(blob, filename) {
+  const safeName = String(filename || 'logm8_export').replace(/[^\w.\-]+/g, '_');
+  try {
+    const [{ Filesystem, Directory }, { Share }] = await Promise.all([
+      import('@capacitor/filesystem'),
+      import('@capacitor/share')
+    ]);
+    const dataUrl = await blobToDataURL(blob);
+    const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+    const written = await Filesystem.writeFile({ path: 'exports/' + safeName, data: base64, directory: Directory.Cache, recursive: true });
+    try {
+      await Share.share({ title: safeName, files: [written.uri], dialogTitle: 'Save or send your LogM8 file' });
+    } catch (shareErr) {
+      if (/cancel/i.test(String(shareErr && shareErr.message || shareErr))) return true;
+      throw shareErr;
+    }
+    return true;
+  } catch (err) {
+    console.error('Native file save failed:', err);
+    showToast('Could not save the file. Please try again.');
+    recordUserActivity('export_save_error');
+    return false;
+  }
+}
+
 function downloadBlob(blob, filename) {
+  if (isNative()) return saveBlobNative(blob, filename);
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -5802,7 +5831,7 @@ window.exportCSV = async () => {
     await exportFallbackXLSX(rows);
     recordUserActivity('xlsx_exported');
     trackEvent('export_logbook', { format: 'xlsx' });
-    showToast('Spreadsheet downloaded');
+    showToast(isNative() ? 'Choose where to save your file' : 'Spreadsheet downloaded');
   } catch (err) {
     console.error('XLSX export failed, falling back to CSV:', err);
     const csv = buildCSV(rows);
@@ -5810,7 +5839,7 @@ window.exportCSV = async () => {
     downloadBlob(blob, 'logm8_export.csv');
     recordUserActivity('csv_exported');
     trackEvent('export_logbook', { format: 'csv_fallback' });
-    showToast('Spreadsheet fallback: CSV downloaded');
+    showToast(isNative() ? 'Choose where to save your file' : 'Spreadsheet fallback: CSV downloaded');
   }
 };
 
@@ -5918,7 +5947,7 @@ window.exportAccountantPack = async () => {
     downloadBlob(blob, `${base}.zip`);
     recordUserActivity('accountant_pack_exported');
     trackEvent('export_accountant_pack', { financialYear });
-    showToast('Accountant Pack downloaded');
+    showToast(isNative() ? 'Choose where to save your file' : 'Accountant Pack downloaded');
   } catch (err) {
     console.error('Accountant Pack export failed:', err);
     showToast('Could not build Accountant Pack');
@@ -5963,7 +5992,7 @@ window.exportVehicleReports = async () => {
     downloadBlob(blob, `logm8_vehicle_reports_${new Date().toISOString().slice(0,10)}.zip`);
     recordUserActivity('vehicle_reports_exported');
     trackEvent('export_vehicle_reports', { vehicleCount: created });
-    showToast('Vehicle reports downloaded');
+    showToast(isNative() ? 'Choose where to save your file' : 'Vehicle reports downloaded');
   } catch (err) {
     console.error('Vehicle reports export failed:', err);
     showToast('Could not build vehicle reports');
