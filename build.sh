@@ -128,6 +128,14 @@ npx esbuild node_modules/@capacitor/preferences/dist/esm/index.js \
 npx esbuild node_modules/@capacitor/local-notifications/dist/esm/index.js \
   --bundle --format=esm --platform=browser --target=chrome70 --log-level=warning \
   --outfile=www/vendor/local-notifications.js
+# Exports (PDF / Excel / CSV / ZIP): a blob: download link does nothing inside the WebView, so the
+# app writes the file with Filesystem and opens the system share sheet with Share.
+npx esbuild node_modules/@capacitor/filesystem/dist/esm/index.js \
+  --bundle --format=esm --platform=browser --target=chrome70 --log-level=warning \
+  --outfile=www/vendor/filesystem.js
+npx esbuild node_modules/@capacitor/share/dist/esm/index.js \
+  --bundle --format=esm --platform=browser --target=chrome70 --log-level=warning \
+  --outfile=www/vendor/share.js
 # Firebase JS SDK shipped inside the app. The web app imports it from www.gstatic.com at every
 # launch (8 module downloads, ~1 MB): slow start on a weak connection and a loading screen that
 # never goes away when any of them fails. Same version as the web app (read from app.html), bundled
@@ -152,7 +160,9 @@ importmap = ('<script type="importmap">{"imports":{'
              '"@revenuecat/purchases-capacitor":"./vendor/purchases-capacitor.js",'
              '"@capacitor-firebase/authentication":"./vendor/firebase-authentication.js",'
              '"@capacitor/preferences":"./vendor/preferences.js",'
-             '"@capacitor/local-notifications":"./vendor/local-notifications.js"'
+             '"@capacitor/local-notifications":"./vendor/local-notifications.js",'
+             '"@capacitor/filesystem":"./vendor/filesystem.js",'
+             '"@capacitor/share":"./vendor/share.js"'
              '}}</script>')
 if 'type="importmap"' not in s:
     s = re.sub(r'(<head[^>]*>)', lambda m: m.group(1) + '\n' + importmap, s, count=1)
@@ -479,7 +489,9 @@ const js = m[1]
   .replace(/import\('@revenuecat\/purchases-capacitor'\)/g, "import('./vendor/purchases-capacitor.js')")
   .replace(/import\('@capacitor-firebase\/authentication'\)/g, "import('./vendor/firebase-authentication.js')")
   .replace(/import\('@capacitor\/preferences'\)/g, "import('./vendor/preferences.js')")
-  .replace(/import\('@capacitor\/local-notifications'\)/g, "import('./vendor/local-notifications.js')");
+  .replace(/import\('@capacitor\/local-notifications'\)/g, "import('./vendor/local-notifications.js')")
+  .replace(/import\('@capacitor\/filesystem'\)/g, "import('./vendor/filesystem.js')")
+  .replace(/import\('@capacitor\/share'\)/g, "import('./vendor/share.js')");
 const polyfill = "if (!Promise.allSettled) { Promise.allSettled = function (ps) { return Promise.all(Array.from(ps, function (p) { return Promise.resolve(p).then(function (value) { return { status: 'fulfilled', value: value }; }, function (reason) { return { status: 'rejected', reason: reason }; }); })); }; }\n";
 const out = transformSync(js, { target: 'chrome70', format: 'esm', loader: 'js', legalComments: 'none' }).code;
 s = s.replace(re, () => '<script type="module">\n' + polyfill + out + '</script>');
