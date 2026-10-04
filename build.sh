@@ -464,6 +464,17 @@ if 'async function rcIdentify()' not in s:
     else:
         raise SystemExit(f'ERROR: RevenueCat identity patch failed (decl={r1} cfg={r2} buy={r3} restore={r4} auth={r5}) - app.html changed?')
 
+# --- getOfferings() shape: @revenuecat/purchases-capacitor returns the offerings object itself
+# ({ current, all }), not { offerings }. The destructuring left `offerings` undefined, so the upgrade
+# sheet died with "Could not load plans" and no purchase could start. Accept both shapes. Idempotent.
+if 'rcOfferingsResult' not in s:
+    s, g1 = re.subn(r"const \{ offerings \} = await rcPurchases\.getOfferings\(\);",
+                    "const rcOfferingsResult = await rcPurchases.getOfferings();\n    const offerings = rcOfferingsResult?.offerings || rcOfferingsResult;", s)
+    if g1 >= 1:
+        print(f'   getOfferings shape fix applied ({g1} places)')
+    else:
+        raise SystemExit('ERROR: getOfferings shape fix failed - app.html changed?')
+
 key = os.environ.get('RC_ANDROID_KEY', '').strip()
 pat = r"(const\s+RC_ANDROID_KEY\s*=\s*)'YOUR_REVENUECAT_ANDROID_KEY'"
 if key.startswith('goog_'):
