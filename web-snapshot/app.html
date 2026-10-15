@@ -14,7 +14,7 @@
 <!-- Capacitor (injected by native shell when running as app) -->
 <script>window.Capacitor = window.Capacitor || null;</script>
 <script>
-window.LOGM8_APP_CACHE_VERSION = 94;
+window.LOGM8_APP_CACHE_VERSION = 95;
 (function(){
   if (window.Capacitor || !window.fetch) return;
   const currentVersion = Number(window.LOGM8_APP_CACHE_VERSION || 0);
@@ -563,6 +563,14 @@ input::placeholder,textarea::placeholder{color:var(--muted2)}
             <span id="gps-txt">GPS off</span>
           </span>
         </div>
+        <div class="purpose-row" id="trip-purpose-live" role="group" aria-label="Trip purpose" style="margin-top:16px">
+          <button class="pbtn work" data-trip-purpose="work" aria-pressed="true" onclick="setPurpose('work')">
+            <svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>Work
+          </button>
+          <button class="pbtn" data-trip-purpose="personal" aria-pressed="false" onclick="setPurpose('personal')">
+            <svg viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>Personal
+          </button>
+        </div>
       </div>
 
       <!-- PRE START -->
@@ -608,10 +616,10 @@ input::placeholder,textarea::placeholder{color:var(--muted2)}
           </div>
           <label class="field-label">Purpose</label>
           <div class="purpose-row" style="margin-bottom:14px">
-            <button class="pbtn work" id="pw" onclick="setPurpose('work')">
+            <button class="pbtn work" id="pw" data-trip-purpose="work" aria-pressed="true" onclick="setPurpose('work')">
               <svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>Work
             </button>
-            <button class="pbtn" id="pp" onclick="setPurpose('personal')">
+            <button class="pbtn" id="pp" data-trip-purpose="personal" aria-pressed="false" onclick="setPurpose('personal')">
               <svg viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>Personal
             </button>
           </div>
@@ -1332,6 +1340,12 @@ const DEMO_ACCESS_BY_EMAIL = {
   'client-pro.20260614@logm8.com.au': 'pro'
 };
 const OWNER_ADMIN_EMAILS = new Set([
+  'feijaowetnow@hotmail.com',
+  'viny@logm8.com.au'
+]);
+// Only the dedicated owner account opens the console on web sign-in. viny@ also drives with
+// LogM8, so it stays in the logbook and opens the console from the menu.
+const OWNER_CONSOLE_AUTO_OPEN_EMAILS = new Set([
   'feijaowetnow@hotmail.com'
 ]);
 let trialStartedAtMs = 0;
@@ -1367,8 +1381,8 @@ let logbookDetails = {
   makeModel: '',
   rego: ''
 };
-const APP_VERSION = '1.5.30';
-const APP_CACHE_VERSION = '94';
+const APP_VERSION = '1.5.32';
+const APP_CACHE_VERSION = '95';
 const SINGLE_INSTANCE_KEY = 'logm8_active_instance_v1';
 const SINGLE_INSTANCE_CHANNEL = 'logm8_single_instance_v1';
 const SINGLE_INSTANCE_TTL_MS = 30000;
@@ -1701,7 +1715,7 @@ const onboardingSlides = [
   },
   {
     title: 'How to log a trip',
-    body: 'Enter your odometer, tap Start, drive, then tap Stop and save. Set trip purpose as Work or Personal before saving.'
+    body: 'Enter your odometer, pick Work or Personal (Work is selected by default), tap Start, drive, then tap Stop. You can switch Work/Personal during the trip or edit it later.'
   },
   {
     title: 'How to export',
@@ -2040,7 +2054,7 @@ onAuthStateChanged(auth, async user => {
   if (user) {
     resetAuthButtons();
     currentUser = user;
-    if (isOwnerAdmin(user.email) && !wantsOwnerLogbookView()) {
+    if (shouldAutoOpenOwnerConsole(user.email)) {
       window.location.replace('/admin');
       return;
     }
@@ -3237,6 +3251,7 @@ function getTrialDaysRemaining() {
 
 function isTrialExpired() {
   if (getDemoTierOverride()) return false;
+  if (isOwnerAdmin()) return false;
   if (isPro) return false;
   if (!trialExpiresAtMs) return false;
   return getServerNowMs() >= trialExpiresAtMs;
@@ -3283,6 +3298,12 @@ function isOwnerAdmin(email = currentUser?.email || '') {
   return OWNER_ADMIN_EMAILS.has(email);
 }
 
+// The native app has no /admin page, so it never redirects there.
+function shouldAutoOpenOwnerConsole(email = '') {
+  email = String(email || '').trim().toLowerCase();
+  return OWNER_CONSOLE_AUTO_OPEN_EMAILS.has(email) && !isNative() && !wantsOwnerLogbookView();
+}
+
 function updateOwnerConsoleUI() {
   const item = document.getElementById('owner-console-item');
   if (item) item.style.display = isOwnerAdmin() ? 'flex' : 'none';
@@ -3293,11 +3314,13 @@ window.openOwnerConsole = () => {
     showToast('Owner access only');
     return;
   }
-  window.location.href = '/admin';
+  // Inside the app, open the console on the website (the system browser handles it).
+  window.location.href = isNative() ? 'https://www.logm8.com.au/admin' : '/admin';
 };
 
 function hasProTier() {
   if (getDemoAccessOverride() === 'pro') return true;
+  if (isOwnerAdmin()) return true;
   const key = getSubscriptionKey();
   return Boolean(
     currentSubscription?.isProTier === true
@@ -6361,6 +6384,7 @@ function showRunningTripUI() {
   document.getElementById('sec-pre').style.display='none';
   document.getElementById('sec-running').style.display='block';
   document.getElementById('sec-post').style.display='none';
+  setTripPurposeLiveVisible(true);
   document.getElementById('run-start').textContent=formatOdometerDisplay(kmStart)+' km';
   document.getElementById('run-gps').textContent='+'+gpsKm.toFixed(1)+' km';
   document.getElementById('run-est').textContent=formatOdometerDisplay(getGpsEstimatedEndKm())+' km';
@@ -6380,6 +6404,7 @@ function showStoppedTripUI() {
   document.getElementById('sec-pre').style.display='none';
   document.getElementById('sec-running').style.display='none';
   document.getElementById('sec-post').style.display='block';
+  setTripPurposeLiveVisible(false);
   document.getElementById('post-start').textContent=formatOdometerDisplay(kmStart)+' km';
   document.getElementById('post-end').textContent=formatOdometerDisplay(kmEnd)+' km';
   document.getElementById('post-km').textContent=gpsKm.toFixed(1)+' km';
@@ -6609,15 +6634,27 @@ function resetTripUI(){
   document.getElementById('sec-post').style.display='none';
   document.getElementById('sec-running').style.display='none';
   document.getElementById('sec-pre').style.display='block';
+  setTripPurposeLiveVisible(true);
+  setPurpose('work'); // every new trip starts as Work unless the driver picks Personal
   refreshNextOdometerStart({ force: false });
 }
 
 window.setPurpose = p => {
-  purpose=p;
-  document.getElementById('pw').className='pbtn'+(p==='work'?' work':'');
-  document.getElementById('pp').className='pbtn'+(p==='personal'?' personal':'');
+  purpose = p === 'personal' ? 'personal' : 'work';
+  // One choice for every Work/Personal row: next to Start/Stop and in the post-trip card.
+  document.querySelectorAll('[data-trip-purpose]').forEach(btn => {
+    const value = btn.getAttribute('data-trip-purpose');
+    btn.className = 'pbtn' + (value === purpose ? ' ' + purpose : '');
+    btn.setAttribute('aria-pressed', value === purpose ? 'true' : 'false');
+  });
   if (activeTripStartedAtMs) saveActiveTripDraft(running ? 'running' : 'stopped');
 };
+
+// The Work/Personal row under Start shows before and during a trip; the post-trip card has its own.
+function setTripPurposeLiveVisible(show) {
+  const row = document.getElementById('trip-purpose-live');
+  if (row) row.style.display = show ? 'flex' : 'none';
+}
 
 document.getElementById('trip-desc')?.addEventListener('input', () => {
   if (activeTripStartedAtMs) saveActiveTripDraft(running ? 'running' : 'stopped');
