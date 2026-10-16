@@ -14,7 +14,7 @@
 <!-- Capacitor (injected by native shell when running as app) -->
 <script>window.Capacitor = window.Capacitor || null;</script>
 <script>
-window.LOGM8_APP_CACHE_VERSION = 95;
+window.LOGM8_APP_CACHE_VERSION = 96;
 (function(){
   if (window.Capacitor || !window.fetch) return;
   const currentVersion = Number(window.LOGM8_APP_CACHE_VERSION || 0);
@@ -277,6 +277,11 @@ input::placeholder,textarea::placeholder{color:var(--muted2)}
 .menu-arrow{color:var(--muted2);font-size:16px}
 .signout-btn{width:100%;padding:14px;background:var(--red-bg);color:var(--red);border:.5px solid rgba(248,113,113,.2);border-radius:16px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;margin-top:8px;transition:opacity .2s}
 .signout-btn:active{opacity:.7}
+.delete-account-link{width:100%;padding:12px;margin-top:6px;background:transparent;color:var(--red);border:none;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+.delete-account-link:active{opacity:.6}
+.action-btn.danger{background:var(--red);color:#1a0606}
+.install-note a{color:inherit;font-weight:800;text-decoration:underline}
+.native-shell .auth-back,.native-shell .auth-site-link{display:none!important}
 
 /* EXPORT BTN */
 .export-btn{width:100%;padding:16px;background:var(--s1);border:.5px solid var(--b2);border-radius:18px;color:var(--text);font-size:14px;font-weight:500;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;transition:background .15s}
@@ -958,6 +963,7 @@ input::placeholder,textarea::placeholder{color:var(--muted2)}
       <button class="signout-btn" onclick="signOut()">Sign out</button>
       <!-- Restore Purchases: required by Google Play & Apple policy -->
       <button id="restore-btn" style="display:none;width:100%;padding:12px;background:transparent;color:var(--muted);border:none;font-size:13px;cursor:pointer;font-family:inherit;margin-top:4px" onclick="restorePurchases()">Restore purchases</button>
+      <button class="delete-account-link" id="delete-account-item" onclick="openDeleteAccount()">Delete account</button>
       <div style="height:24px"></div>
     </div>
   </div>
@@ -1240,6 +1246,22 @@ input::placeholder,textarea::placeholder{color:var(--muted2)}
   </div>
 </div>
 
+<!-- DELETE ACCOUNT -->
+<div id="delete-account-modal" class="sheet-modal" onclick="closeDeleteAccountOutside(event)">
+  <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="delete-account-title">
+    <div class="sheet-title" id="delete-account-title">Delete account</div>
+    <div class="sheet-copy">This permanently deletes your LogM8 account and everything in it: trips, odometer readings, vehicles, expenses and receipt photos. It can't be undone.
+
+If you need your logbook for your tax records, use Export my data first.</div>
+    <div class="install-note" id="delete-account-note" style="display:none"></div>
+    <label class="field-label" for="delete-account-confirm" style="margin-top:16px">Type DELETE to confirm</label>
+    <input id="delete-account-confirm" class="mini-input" placeholder="DELETE" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" oninput="syncDeleteAccountButton()"/>
+    <div class="sheet-sub" id="delete-account-status" role="status" aria-live="polite"></div>
+    <button class="action-btn danger" id="delete-account-btn" onclick="confirmDeleteAccount()" disabled>Delete my account</button>
+    <button class="upgrade-cancel" id="delete-account-cancel" onclick="closeDeleteAccount()">Cancel</button>
+  </div>
+</div>
+
 <!-- ONBOARDING -->
 <div id="onboarding-modal" class="sheet-modal" onclick="closeOnboardingOutside(event)">
   <div class="sheet-card">
@@ -1314,6 +1336,7 @@ const createBillingPortalSessionFn = httpsCallable(functions, 'createBillingPort
 const registerFcmTokenFn = httpsCallable(functions, 'registerFcmToken');
 const registerWebPushSubscriptionFn = httpsCallable(functions, 'registerWebPushSubscription');
 const updateNotificationPreferenceFn = httpsCallable(functions, 'updateNotificationPreference');
+const deleteMyAccountFn = httpsCallable(functions, 'deleteMyAccount', { timeout: 120000 });
 
 let currentUser = null;
 let trips = [];
@@ -1381,8 +1404,8 @@ let logbookDetails = {
   makeModel: '',
   rego: ''
 };
-const APP_VERSION = '1.5.32';
-const APP_CACHE_VERSION = '95';
+const APP_VERSION = '1.5.33';
+const APP_CACHE_VERSION = '96';
 const SINGLE_INSTANCE_KEY = 'logm8_active_instance_v1';
 const SINGLE_INSTANCE_CHANNEL = 'logm8_single_instance_v1';
 const SINGLE_INSTANCE_TTL_MS = 30000;
@@ -1415,6 +1438,7 @@ let savingTrip = false;
 // -- ENVIRONMENT DETECTION ---------------------------------------
 // isNative = true when running inside Capacitor Android/iOS app
 const isNative = () => !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+if (isNative()) document.documentElement.classList.add('native-shell');
 
 function isStandaloneApp() {
   return Boolean(
@@ -3602,6 +3626,154 @@ window.resetPassword = async () => {
 window.signOut = async () => {
   trips = []; expenses = [];
   await fbSignOut(auth);
+};
+
+// -- DELETE ACCOUNT ----------------------------------------------
+// App Store 5.1.1(v) / Google Play: the account and all its data can be deleted from inside the app.
+// The work runs server-side (callable deleteMyAccount, backend/account-deletion): the Firestore rules
+// do not let the client delete its profile, and expired-trial users cannot delete trips/expenses.
+let deleteAccountBusy = false;
+
+function deleteAccountStoreLabel() {
+  try {
+    if (typeof NATIVE_STORE_NAME === 'string' && NATIVE_STORE_NAME) return NATIVE_STORE_NAME;
+  } catch (e) {
+    // web build: no store name
+  }
+  return 'your app store';
+}
+
+function deleteAccountSubscriptionKind() {
+  const sub = currentSubscription && typeof currentSubscription === 'object' ? currentSubscription : null;
+  if (!sub) return '';
+  const status = String(sub.status || '').toLowerCase();
+  const active = isPro === true || sub.isPro === true || ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
+  if (!active) return '';
+  const tags = `${sub.provider || ''} ${sub.source || ''} ${sub.store || ''} ${sub.plan || ''}`.toLowerCase();
+  if (tags.includes('manual') || tags.includes('tester')) return '';
+  const hasStripeIds = Object.values(sub).some(v => typeof v === 'string' && /^(cus|sub)_/.test(v));
+  if (tags.includes('stripe') || hasStripeIds) return 'web';
+  return 'store';
+}
+
+function renderDeleteAccountNote() {
+  const note = document.getElementById('delete-account-note');
+  if (!note) return;
+  const kind = deleteAccountSubscriptionKind();
+  note.textContent = '';
+  if (kind === 'store' && isNative()) {
+    note.append(`Deleting your account does not cancel a subscription bought in ${deleteAccountStoreLabel()}. Cancel it there first so you are not charged again. `);
+    const link = document.createElement('a');
+    link.href = '#';
+    link.textContent = 'Manage subscription';
+    link.addEventListener('click', openStoreSubscriptions);
+    note.append(link);
+  } else if (kind === 'store') {
+    note.textContent = 'Deleting your account does not cancel a subscription bought in an app store. Cancel it in the store you bought it from first so you are not charged again.';
+  } else if (kind === 'web') {
+    note.textContent = 'Your LogM8 subscription will be cancelled automatically, so you will not be charged again.';
+  }
+  note.style.display = kind ? 'block' : 'none';
+}
+
+function openStoreSubscriptions(e) {
+  if (e) e.preventDefault();
+  const platform = window.Capacitor?.getPlatform?.() || '';
+  window.location.href = platform === 'ios'
+    ? 'https://apps.apple.com/account/subscriptions'
+    : 'https://play.google.com/store/account/subscriptions?package=au.com.logm8.app';
+}
+
+function setDeleteAccountStatus(message, isError = false) {
+  const el = document.getElementById('delete-account-status');
+  if (!el) return;
+  el.textContent = message || '';
+  el.style.color = isError ? 'var(--red)' : '';
+}
+
+window.syncDeleteAccountButton = () => {
+  const input = document.getElementById('delete-account-confirm');
+  const btn = document.getElementById('delete-account-btn');
+  const typed = String(input?.value || '').trim().toUpperCase() === 'DELETE';
+  if (btn) btn.disabled = deleteAccountBusy || !typed;
+};
+
+window.openDeleteAccount = () => {
+  if (!currentUser) { showToast('Please sign in first'); return; }
+  if (running) { showToast('Stop your current trip first'); return; }
+  const input = document.getElementById('delete-account-confirm');
+  if (input) { input.value = ''; input.disabled = false; }
+  setDeleteAccountStatus('');
+  renderDeleteAccountNote();
+  syncDeleteAccountButton();
+  document.getElementById('delete-account-modal').classList.add('open');
+};
+
+window.closeDeleteAccount = () => {
+  if (deleteAccountBusy) return;
+  document.getElementById('delete-account-modal').classList.remove('open');
+};
+
+window.closeDeleteAccountOutside = e => {
+  if (e.target === document.getElementById('delete-account-modal')) closeDeleteAccount();
+};
+
+function clearLocalDataForUser(uid) {
+  if (!uid) return;
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.includes(uid)) keys.push(key);
+    }
+    keys.forEach(key => localStorage.removeItem(key));
+  } catch (e) {
+    // storage blocked: nothing cached to clear
+  }
+}
+
+function deleteAccountErrorMessage(e) {
+  const code = String(e?.code || '').replace(/^functions\//, '');
+  const message = String(e?.message || '');
+  if (code === 'unavailable' && message && !/^(unavailable|internal)$/i.test(message)) return message;
+  if (code === 'not-found' || code === 'unimplemented') {
+    return 'Account deletion is not available right now. Email contact@logm8.com.au and we will delete your account within 30 days.';
+  }
+  if (code === 'unauthenticated') return 'Please sign out, sign in again and try once more.';
+  return 'We could not delete your account. Check your connection and try again.';
+}
+
+window.confirmDeleteAccount = async () => {
+  if (deleteAccountBusy || !currentUser) return;
+  const input = document.getElementById('delete-account-confirm');
+  if (String(input?.value || '').trim().toUpperCase() !== 'DELETE') { syncDeleteAccountButton(); return; }
+  const btn = document.getElementById('delete-account-btn');
+  const cancelBtn = document.getElementById('delete-account-cancel');
+  const uid = currentUser.uid;
+  deleteAccountBusy = true;
+  if (btn) { btn.disabled = true; btn.textContent = 'Deleting...'; }
+  if (cancelBtn) cancelBtn.disabled = true;
+  if (input) input.disabled = true;
+  setDeleteAccountStatus('Deleting your account. This can take a few seconds.');
+  try {
+    await deleteMyAccountFn({ confirm: 'DELETE' });
+    trackEvent('account_delete');
+    clearLocalDataForUser(uid);
+    deleteAccountBusy = false;
+    document.getElementById('delete-account-modal').classList.remove('open');
+    trips = []; expenses = [];
+    try { await fbSignOut(auth); } catch (e) { /* the login no longer exists */ }
+    showToast('Your LogM8 account has been deleted', 4000);
+  } catch (e) {
+    console.error('deleteMyAccount error:', e);
+    deleteAccountBusy = false;
+    setDeleteAccountStatus(deleteAccountErrorMessage(e), true);
+  } finally {
+    if (btn) btn.textContent = 'Delete my account';
+    if (cancelBtn) cancelBtn.disabled = false;
+    if (input) input.disabled = false;
+    syncDeleteAccountButton();
+  }
 };
 
 function getDataCacheKey() {

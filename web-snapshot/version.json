@@ -1,8 +1,8 @@
 {
     "app": "logm8",
-    "appVersion": "1.5.32",
-    "cacheVersion": 95,
-    "minCacheVersion": 95,
+    "appVersion": "1.5.33",
+    "cacheVersion": 96,
+    "minCacheVersion": 96,
     "forceRepairBefore": 93,
-    "updatedAt": "2026-10-15T11:58:00Z"
+    "updatedAt": "2026-10-16T10:30:00Z"
 }
