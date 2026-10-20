@@ -14,7 +14,7 @@
 <!-- Capacitor (injected by native shell when running as app) -->
 <script>window.Capacitor = window.Capacitor || null;</script>
 <script>
-window.LOGM8_APP_CACHE_VERSION = 96;
+window.LOGM8_APP_CACHE_VERSION = 97;
 (function(){
   if (window.Capacitor || !window.fetch) return;
   const currentVersion = Number(window.LOGM8_APP_CACHE_VERSION || 0);
@@ -1282,7 +1282,7 @@ If you need your logbook for your tax records, use Export my data first.</div>
 <!-- FIREBASE -->
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-import { getAuth, onAuthStateChanged, signInWithRedirect, getRedirectResult, GoogleAuthProvider,
+import { getAuth, onAuthStateChanged, signInWithRedirect, signInWithPopup, getRedirectResult, GoogleAuthProvider,
          createUserWithEmailAndPassword, signInWithEmailAndPassword,
          sendPasswordResetEmail, signOut as fbSignOut, updateProfile,
          setPersistence, browserLocalPersistence }
@@ -1404,8 +1404,8 @@ let logbookDetails = {
   makeModel: '',
   rego: ''
 };
-const APP_VERSION = '1.5.33';
-const APP_CACHE_VERSION = '96';
+const APP_VERSION = '1.5.34';
+const APP_CACHE_VERSION = '97';
 const SINGLE_INSTANCE_KEY = 'logm8_active_instance_v1';
 const SINGLE_INSTANCE_CHANNEL = 'logm8_single_instance_v1';
 const SINGLE_INSTANCE_TTL_MS = 30000;
@@ -3556,6 +3556,17 @@ async function deleteStoredReceipt(path) {
 window.signInGoogle = async () => {
   try {
     clearAuthMessages();
+    if (!isNative()) {
+      // Web: popup. The redirect return is blocked by browsers when authDomain is another domain.
+      await authPersistenceReady;
+      try {
+        await signInWithPopup(auth, googleProvider);
+        return;
+      } catch (popupError) {
+        const code = String(popupError?.code || '');
+        if (code !== 'auth/popup-blocked' && code !== 'auth/operation-not-supported-in-this-environment') throw popupError;
+      }
+    }
     await authPersistenceReady;
     try { sessionStorage.setItem('logm8_google_redirect_pending', '1'); } catch (_err) {}
     await signInWithRedirect(auth, googleProvider);
