@@ -1287,7 +1287,7 @@ import { getAuth, onAuthStateChanged, signInWithRedirect, signInWithPopup, getRe
          sendPasswordResetEmail, signOut as fbSignOut, updateProfile,
          setPersistence, browserLocalPersistence }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-import { getFirestore, collection, addDoc, getDocs, query, orderBy, where, serverTimestamp, doc, setDoc, getDoc, runTransaction }
+import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, addDoc, getDocs, query, orderBy, where, serverTimestamp, doc, setDoc, getDoc, runTransaction }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 import { getFunctions, httpsCallable }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js';
@@ -1314,7 +1314,13 @@ const auth = getAuth(app);
 const authPersistenceReady = setPersistence(auth, browserLocalPersistence).catch((error) => {
   console.warn('Could not force local auth persistence:', error);
 });
-const db   = getFirestore(app);
+let db;
+try {
+  db = initializeFirestore(app, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
+} catch (e) {
+  console.warn('Firestore offline cache unavailable, using memory cache:', e);
+  db = getFirestore(app);
+}
 const functions = getFunctions(app, 'australia-southeast1');
 const storage = getStorage(app);
 let remoteConfig = null;
@@ -1495,7 +1501,7 @@ function hasPaidBasicDownloadAccess() {
   const source = String(currentSubscription?.source || '').toLowerCase();
   const status = String(currentSubscription?.status || '').toLowerCase();
   if (provider === 'manual' || source === 'manual_admin') return true;
-  return isPro === true && status === 'active';
+  return isPro === true && ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
 }
 
 function syncInstallManifestAccess() {
@@ -2383,6 +2389,7 @@ function updateVehicleUI() {
 
 async function persistVehicles() {
   if (!currentUser) return;
+  if (profileLoadFailed) throw new Error('profile-not-loaded');
   await setDoc(doc(db, 'users', currentUser.uid), { vehicles, activeVehicleId, logbookDetails }, { merge: true });
 }
 
@@ -2509,6 +2516,10 @@ window.saveLogbookDetails = async () => {
     }
   }
 
+  if (profileLoadFailed) {
+    showProfileRetryToast();
+    return;
+  }
   logbookDetails = next;
   setLogbookDetailsForm();
   try {
@@ -3249,12 +3260,14 @@ async function refreshSubscriptionStatus(sessionId = '') {
       || ['basic_demo', 'demo_basic', 'demo_pro', 'tester_forever'].includes(getSubscriptionKey());
     const payload = sessionId ? { sessionId } : {};
     const result = await refreshMySubscriptionFn(payload);
-    applyTrialPayload(result?.data || {});
-    const subscription = result?.data?.subscription || null;
+    const resultData = result?.data && typeof result.data === 'object' ? result.data : null;
+    applyTrialPayload(resultData || {});
+    const subscription = resultData?.subscription || null;
     if (subscription) {
       currentSubscription = subscription;
       isPro = subscription.isPro === true;
-    } else if (!existingManual) {
+    } else if (!existingManual && resultData && Object.prototype.hasOwnProperty.call(resultData, 'subscription') && resultData.subscription === null) {
+      // Only an explicit "no subscription" answer downgrades; an empty/failed response keeps the current state.
       currentSubscription = null;
       isPro = false;
     }
@@ -3894,9 +3907,20 @@ function buildTripClientId(startedAtMs, vehicleId) {
   return `trip_${uid}_${vehicle}_${started}`;
 }
 
+function withTimeout(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise.then(v => ({ timedOut: false, value: v })),
+    new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), ms); })
+  ]).finally(() => clearTimeout(timer));
+}
+const TRIP_SAVE_TIMEOUT_MS = 8000;
+
 window.saveTrip = async () => {
   if (!currentUser) return;
-  if (requirePaidAccess('trip saving')) return;
+  // A trip that started while the trial was valid can still be saved after it ends.
+  const startedInTrial = !!(activeTripStartedAtMs && trialExpiresAtMs && activeTripStartedAtMs < trialExpiresAtMs);
+  if (!startedInTrial && requirePaidAccess('trip saving')) return;
   if (savingTrip) {
     showToast('Trip is already saving');
     return;
@@ -3915,7 +3939,7 @@ window.saveTrip = async () => {
   const desc  = document.getElementById('trip-desc').value || 'Trip';
   const dur   = fmtShort(secs);
   const isWork = purpose === 'work';
-  const activeVehicle = getActiveVehicle();
+  const activeVehicle = getTripVehicle();
   const tripStartedAtMs = activeTripStartedAtMs || Date.now();
   const now = new Date(tripStartedAtMs);
   const localSavedAtMs = Date.now();
@@ -3942,7 +3966,17 @@ window.saveTrip = async () => {
   savingTrip = true;
   setSaveTripBusy(true);
   try {
-    await setDoc(doc(db, 'trips', clientTripId), tripPayload, { merge: true });
+    // With the offline cache the write is queued locally at once; the promise only settles when the
+    // server acknowledges. Don't wait forever offline: after the timeout the trip is kept locally and syncs later.
+    const writePromise = setDoc(doc(db, 'trips', clientTripId), tripPayload, { merge: true });
+    writePromise.catch(err => {
+      console.error('Trip sync failed:', err);
+      if (String(err?.code || err?.message || '').includes('permission-denied')) {
+        showToast('Your trial has ended. Subscribe to save this trip — it is kept on this device.', 6000);
+      }
+    });
+    const writeResult = await withTimeout(writePromise, TRIP_SAVE_TIMEOUT_MS);
+    const savedLocallyOnly = writeResult.timedOut;
     const trip = {
       id: clientTripId,
       uid: currentUser.uid,
@@ -3968,10 +4002,18 @@ window.saveTrip = async () => {
     recordUserActivity('trip_saved');
     clearActiveTripDraft();
     resetTripUI();
-    showToast('Trip saved');
+    showToast(savedLocallyOnly ? 'Saved on this device, will sync' : 'Trip saved', savedLocallyOnly ? 4000 : 2500);
     setNextOdometerStartInput(kmEnd, { force: true });
   } catch(e) {
-    showToast('Error saving trip');
+    // Draft is never cleared here: the trip stays on this device for a retry.
+    protectActiveTrip('save_error');
+    const code = String(e?.code || e?.message || '');
+    if (code.includes('permission-denied')) {
+      showToast('Your trial has ended. Subscribe to save this trip — it is kept on this device.', 6000);
+      window.openUpgrade();
+    } else {
+      showToast("Couldn't save. Trip kept on this device; tap Save to retry.", 6000);
+    }
     recordUserActivity('trip_save_error');
     console.error(e);
   } finally {
@@ -6209,6 +6251,8 @@ window.exportVehicleReports = async () => {
 let running=false,intv=null,activeTripSaveTimer=null,activeTripReminderTimer=null,secs=0,purpose='work',dpurpose='work',expType='fuel';
 let kmStart=0,gpsKm=0,watchId=null,lastPos=null;
 let activeTripStartedAtMs=0, activeTripLastReminderAtMs=0, manualTripEndKm=null;
+let activeTripVehicle=null; // vehicle the current trip belongs to (locked at start / restored from draft)
+function getTripVehicle() { return activeTripVehicle || getActiveVehicle(); }
 
 function pad(n){return String(n).padStart(2,'0')}
 window.fmt  = s => `${pad(Math.floor(s/3600))}:${pad(Math.floor((s%3600)/60))}:${pad(s%60)}`;
@@ -6385,6 +6429,7 @@ function clearActiveTripDraft() {
   activeTripStartedAtMs = 0;
   activeTripLastReminderAtMs = 0;
   manualTripEndKm = null;
+  activeTripVehicle = null;
   document.title = 'LogM8 - ATO Logbook';
 }
 
@@ -6400,7 +6445,9 @@ function updateActiveTripNote(status = running ? 'running' : 'stopped') {
 
 function saveActiveTripDraft(status = running ? 'running' : 'stopped') {
   if (!currentUser || !activeTripStartedAtMs) return;
-  const activeVehicle = getActiveVehicle();
+  const tv = getTripVehicle();
+  if (!activeTripVehicle) activeTripVehicle = { id: tv.id, name: tv.name };
+  const activeVehicle = activeTripVehicle;
   if (status === 'running') {
     secs = Math.max(secs, Math.floor((Date.now() - activeTripStartedAtMs) / 1000));
   }
@@ -6603,7 +6650,7 @@ function restoreActiveTripIfNeeded() {
   if (!draft || draft.uid !== currentUser?.uid || !draft.startedAtMs) return false;
   const draftStartedAtMs = Number(draft.startedAtMs) || Date.now();
   const draftAgeMs = Date.now() - draftStartedAtMs;
-  if (draftAgeMs > ACTIVE_TRIP_STALE_MS) {
+  if (draftAgeMs > ACTIVE_TRIP_STALE_MS && draft.status !== 'stopped') {
     // A draft this old is a trip nobody stopped: drop it instead of showing a days-long timer.
     clearActiveTripDraft();
     resetTripUI();
@@ -6613,6 +6660,10 @@ function restoreActiveTripIfNeeded() {
   }
   activeTripStartedAtMs = draftStartedAtMs;
   activeTripLastReminderAtMs = Number(draft.lastReminderAtMs) || 0;
+  if (draft.vehicleId) {
+    const known = vehicles.find(v => v.id === draft.vehicleId);
+    activeTripVehicle = { id: draft.vehicleId, name: known?.name || draft.vehicleName || 'My vehicle' };
+  }
   kmStart = Number(draft.kmStart) || 0;
   gpsKm = Number(draft.gpsKm) || 0;
   manualTripEndKm = parseOdometerValue(draft.manualTripEndKm);
@@ -6849,6 +6900,7 @@ function resetTripUI(){
   manualTripEndKm=null;
   activeTripStartedAtMs=0;
   activeTripLastReminderAtMs=0;
+  activeTripVehicle=null;
   document.getElementById('timer').textContent='00:00:00';
   document.getElementById('tlabel').textContent='Ready to start';
   document.getElementById('trip-desc').value='';
@@ -7016,6 +7068,12 @@ function friendlyBillingError(err){
 }
 
 // -- PRO STATUS --------------------------------------------------
+let profileLoadFailed = false;
+function profileCacheKey() { return currentUser ? `logm8_profile_cache_${currentUser.uid}` : ''; }
+function showProfileRetryToast() {
+  showToast("Couldn't load your profile. Vehicle changes are paused — reconnect and reopen LogM8 to retry.", 6000);
+  if (navigator.onLine === false) window.addEventListener('online', () => { if (profileLoadFailed) loadProStatus(); }, { once: true });
+}
 async function loadProStatus() {
   if (!currentUser) return;
   try {
@@ -7062,14 +7120,24 @@ async function loadProStatus() {
     }
     trialStartedAtMs = started;
     trialExpiresAtMs = expires;
+    profileLoadFailed = false;
+    try {
+      localStorage.setItem(profileCacheKey(), JSON.stringify({ uid: currentUser.uid, savedAtMs: Date.now(), vehicles, activeVehicleId, logbookDetails, trialStartedAtMs, trialExpiresAtMs }));
+    } catch (_) {}
   } catch(e) {
-    isPro = false;
-    trialStartedAtMs = getServerNowMs();
-    trialExpiresAtMs = trialStartedAtMs + TRIAL_MS;
-    vehicles = [{ id: 'v_default', name: 'My vehicle', plate: '' }];
-    activeVehicleId = 'v_default';
-    logbookDetails = normalizeLogbookDetails({}, vehicles[0]).logbookDetails;
-    currentSubscription = null;
+    console.error('loadProStatus error:', e);
+    // Never replace the real profile with defaults: use the last cached copy and block writes until a good load.
+    profileLoadFailed = true;
+    let cached = null;
+    try { cached = JSON.parse(localStorage.getItem(profileCacheKey()) || 'null'); } catch (_) {}
+    if (cached && cached.uid === currentUser.uid && Array.isArray(cached.vehicles) && cached.vehicles.length) {
+      vehicles = cached.vehicles;
+      activeVehicleId = cached.activeVehicleId || vehicles[0].id;
+      if (cached.logbookDetails) logbookDetails = cached.logbookDetails;
+      if (!trialStartedAtMs && Number(cached.trialStartedAtMs) > 0) trialStartedAtMs = Number(cached.trialStartedAtMs);
+      if (!trialExpiresAtMs && Number(cached.trialExpiresAtMs) > 0) trialExpiresAtMs = Number(cached.trialExpiresAtMs);
+    }
+    showProfileRetryToast();
   }
   updateVehicleUI();
   setLogbookDetailsForm();
@@ -7335,7 +7403,7 @@ window.checkForFreshAppVersion = checkForFreshAppVersion;
 if (!window.Capacitor && 'serviceWorker' in navigator) {
   (async () => {
     try {
-      const CLEAN_KEY = `logm8_sw_cleanup_v${window.LOGM8_APP_CACHE_VERSION || '87'}_done`;
+      const CLEAN_KEY = `logm8_sw_cleanup_v${String(window.LOGM8_APP_CACHE_VERSION)}_done`;
       let cleanupStore = sessionStorage;
       try {
         localStorage.setItem('__logm8_storage_test', '1');
@@ -7370,7 +7438,7 @@ if (!window.Capacitor && 'serviceWorker' in navigator) {
       window.__logm8ControllerReloaded = true;
       window.__logm8AutoUpdating = true;
       if (typeof protectActiveTrip === 'function') protectActiveTrip('controllerchange');
-      const cacheVersion = window.LOGM8_APP_CACHE_VERSION || '87';
+      const cacheVersion = String(window.LOGM8_APP_CACHE_VERSION);
       const nextUrl = new URL(location.href);
       nextUrl.pathname = '/app.html';
       nextUrl.searchParams.set('v', String(cacheVersion));
