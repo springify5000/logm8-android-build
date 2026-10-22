@@ -136,6 +136,12 @@ npx esbuild node_modules/@capacitor/filesystem/dist/esm/index.js \
 npx esbuild node_modules/@capacitor/share/dist/esm/index.js \
   --bundle --format=esm --platform=browser --target=chrome70 --log-level=warning \
   --outfile=www/vendor/share.js
+# Trip GPS with the screen locked: the WebView's watchPosition is suspended in background, so the
+# native app records through @capacitor-community/background-geolocation (no JS layer shipped ->
+# thin registerPlugin bridge, same approach as firebase-authentication).
+npx esbuild vendor-src/background-geolocation.js \
+  --bundle --format=esm --platform=browser --target=chrome70 --log-level=warning \
+  --outfile=www/vendor/background-geolocation.js
 # Firebase JS SDK shipped inside the app. The web app imports it from www.gstatic.com at every
 # launch (8 module downloads, ~1 MB): slow start on a weak connection and a loading screen that
 # never goes away when any of them fails. Same version as the web app (read from app.html), bundled
@@ -162,7 +168,8 @@ importmap = ('<script type="importmap">{"imports":{'
              '"@capacitor/preferences":"./vendor/preferences.js",'
              '"@capacitor/local-notifications":"./vendor/local-notifications.js",'
              '"@capacitor/filesystem":"./vendor/filesystem.js",'
-             '"@capacitor/share":"./vendor/share.js"'
+             '"@capacitor/share":"./vendor/share.js",'
+             '"@capacitor-community/background-geolocation":"./vendor/background-geolocation.js"'
              '}}</script>')
 if 'type="importmap"' not in s:
     s = re.sub(r'(<head[^>]*>)', lambda m: m.group(1) + '\n' + importmap, s, count=1)
@@ -502,7 +509,9 @@ const js = m[1]
   .replace(/import\('@capacitor\/preferences'\)/g, "import('./vendor/preferences.js')")
   .replace(/import\('@capacitor\/local-notifications'\)/g, "import('./vendor/local-notifications.js')")
   .replace(/import\('@capacitor\/filesystem'\)/g, "import('./vendor/filesystem.js')")
-  .replace(/import\('@capacitor\/share'\)/g, "import('./vendor/share.js')");
+  .replace(/import\('@capacitor\/share'\)/g, "import('./vendor/share.js')")
+  .replace(/import\('@capacitor-community\/background-geolocation'\)/g, "import('./vendor/background-geolocation.js')");
+if (/import\('@capacitor-community\/background-geolocation'\)/.test(js) || !js.includes("import('./vendor/background-geolocation.js')")) throw new Error('background-geolocation import not rewritten');
 const polyfill = "if (!Promise.allSettled) { Promise.allSettled = function (ps) { return Promise.all(Array.from(ps, function (p) { return Promise.resolve(p).then(function (value) { return { status: 'fulfilled', value: value }; }, function (reason) { return { status: 'rejected', reason: reason }; }); })); }; }\n";
 const out = transformSync(js, { target: 'chrome70', format: 'esm', loader: 'js', legalComments: 'none' }).code;
 s = s.replace(re, () => '<script type="module">\n' + polyfill + out + '</script>');

@@ -55,6 +55,11 @@
     <!-- GPS trip tracking (navigator.geolocation inside the WebView) -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Trip GPS with the screen locked: background-geolocation plugin runs a location foreground
+         service started while the app is visible (no ACCESS_BACKGROUND_LOCATION needed) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Receipt photos via <input type="file" capture> -->
     <uses-permission android:name="android.permission.CAMERA" />
 
@@ -62,6 +67,7 @@
          plugin declares (Play restricts SCHEDULE_EXACT_ALARM to alarm/calendar apps). -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" tools:node="remove" />
 
-    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
+    <!-- the plugin manifest declares gps as required; keep the app installable on devices without it -->
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" tools:replace="android:required" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 </manifest>

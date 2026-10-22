@@ -134,6 +134,7 @@ npx cap add ios
 # Authentication plugin pulls the Google Sign-In SDK through its "Google" package trait (enabled by
 # default, selected explicitly in capacitor.config.json together with the Facebook trait left out).
 grep -q "GoogleSignIn\|CapacitorFirebaseAuthentication" ios/App/CapApp-SPM/Package.swift || { echo "ERROR: Firebase Authentication plugin missing from Package.swift"; exit 1; }
+grep -q "CapacitorCommunityBackgroundGeolocation" ios/App/CapApp-SPM/Package.swift || { echo "ERROR: background-geolocation plugin missing from Package.swift (screen-locked trip GPS)"; exit 1; }
 # AppDelegate: configure Firebase from public/GoogleService-Info.plist before any plugin loads
 cp -f ios-overlay/AppDelegate.swift ios/App/App/AppDelegate.swift
 cp -f ios-overlay/App.entitlements ios/App/App/App.entitlements
@@ -158,7 +159,12 @@ d['CFBundleDisplayName'] = 'LogM8'
 d['CFBundleShortVersionString'] = os.environ['VERSION_NAME']
 d['CFBundleVersion'] = os.environ['BUILD_NUMBER']
 d['NSLocationWhenInUseUsageDescription'] = 'LogM8 uses your location to record the distance and route of your trips in your vehicle logbook.'
-d['NSLocationAlwaysAndWhenInUseUsageDescription'] = d['NSLocationWhenInUseUsageDescription']
+d['NSLocationAlwaysAndWhenInUseUsageDescription'] = 'LogM8 uses your location to keep recording a trip you started while your phone is locked.'
+# Trip GPS keeps running with the screen locked (@capacitor-community/background-geolocation)
+modes = list(d.get('UIBackgroundModes', []))
+if 'location' not in modes: modes.append('location')
+d['UIBackgroundModes'] = modes
+assert 'location' in d['UIBackgroundModes'], 'UIBackgroundModes location not set'
 d['NSCameraUsageDescription'] = 'LogM8 uses the camera to photograph receipts and odometer readings.'
 d['NSPhotoLibraryUsageDescription'] = 'LogM8 lets you attach receipt photos from your photo library.'
 d['ITSAppUsesNonExemptEncryption'] = False

@@ -14,7 +14,7 @@
 <!-- Capacitor (injected by native shell when running as app) -->
 <script>window.Capacitor = window.Capacitor || null;</script>
 <script>
-window.LOGM8_APP_CACHE_VERSION = 97;
+window.LOGM8_APP_CACHE_VERSION = 98;
 (function(){
   if (window.Capacitor || !window.fetch) return;
   const currentVersion = Number(window.LOGM8_APP_CACHE_VERSION || 0);
@@ -1404,8 +1404,8 @@ let logbookDetails = {
   makeModel: '',
   rego: ''
 };
-const APP_VERSION = '1.5.34';
-const APP_CACHE_VERSION = '97';
+const APP_VERSION = '1.5.35';
+const APP_CACHE_VERSION = '98';
 const SINGLE_INSTANCE_KEY = 'logm8_active_instance_v1';
 const SINGLE_INSTANCE_CHANNEL = 'logm8_single_instance_v1';
 const SINGLE_INSTANCE_TTL_MS = 30000;
@@ -6714,10 +6714,46 @@ const GPS_MAX_ACCURACY_M = 35;
 const GPS_MIN_STEP_M = 8;
 const GPS_MAX_SPEED_MS = 60;
 const GPS_MAX_STEP_NO_TIME_M = 120; // cap for steps when two fixes share a timestamp (speed unknowable)
+// Native apps: the WebView's watchPosition is suspended when the screen locks, so the
+// background-geolocation plugin (foreground service on Android, background location on iOS)
+// feeds the same handler. Web keeps navigator.geolocation.
+let bgWatcherId=null,bgWatchSeq=0;
 function startGPS(){
   setGPS('acquiring','Acquiring GPS...');
+  if(isNative()){startNativeGPS();return;}
   if(!navigator.geolocation){setGPS('off','GPS unavailable');return;}
-  watchId=navigator.geolocation.watchPosition(pos=>{
+  watchId=navigator.geolocation.watchPosition(onGpsPosition,()=>setGPS('off','GPS error'),{enableHighAccuracy:true,maximumAge:4000,timeout:15000});
+}
+
+async function startNativeGPS(){
+  const seq=++bgWatchSeq;
+  try{
+    const { BackgroundGeolocation } = await import('@capacitor-community/background-geolocation');
+    const id=await BackgroundGeolocation.addWatcher({
+      backgroundMessage:'LogM8 is recording your trip',
+      backgroundTitle:'Trip in progress',
+      requestPermissions:true,
+      stale:false,
+      distanceFilter:10
+    },(loc,err)=>{
+      if(err){
+        setGPS('off',err.code==='NOT_AUTHORIZED'?'Location permission needed':'GPS error');
+        return;
+      }
+      if(!loc) return;
+      onGpsPosition({coords:{latitude:loc.latitude,longitude:loc.longitude,accuracy:loc.accuracy,speed:loc.speed},timestamp:loc.time||Date.now()});
+    });
+    if(seq!==bgWatchSeq){BackgroundGeolocation.removeWatcher({id}).catch(()=>{});return;}
+    bgWatcherId=id;
+  }catch(e){
+    console.warn('Background GPS unavailable, using WebView GPS:',e);
+    if(seq!==bgWatchSeq) return;
+    if(!navigator.geolocation){setGPS('off','GPS unavailable');return;}
+    watchId=navigator.geolocation.watchPosition(onGpsPosition,()=>setGPS('off','GPS error'),{enableHighAccuracy:true,maximumAge:4000,timeout:15000});
+  }
+}
+
+function onGpsPosition(pos){
     const acc=Number(pos.coords.accuracy);
     if(Number.isFinite(acc) && acc>GPS_MAX_ACCURACY_M){
       setGPS('active','GPS active - weak signal');
@@ -6745,10 +6781,14 @@ function startGPS(){
     document.getElementById('run-gps').textContent='+'+gpsKm.toFixed(1)+' km';
     document.getElementById('run-est').textContent=formatOdometerDisplay(est)+' km';
     saveActiveTripDraft('running');
-  },()=>setGPS('off','GPS error'),{enableHighAccuracy:true,maximumAge:4000,timeout:15000});
 }
 
 function stopGPS(){
+  bgWatchSeq++;
+  if(bgWatcherId!==null){
+    const id=bgWatcherId; bgWatcherId=null;
+    import('@capacitor-community/background-geolocation').then(({BackgroundGeolocation})=>BackgroundGeolocation.removeWatcher({id})).catch(e=>console.warn('removeWatcher failed:',e));
+  }
   if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}
   lastPos=null; setGPS('off','GPS off');
 }
