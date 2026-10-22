@@ -23,6 +23,11 @@ window.LOGM8_APP_CACHE_VERSION = 98;
     .then(async (info) => {
       const requiredVersion = Number(info && (info.minCacheVersion || info.cacheVersion || 0));
       if (!requiredVersion || currentVersion >= requiredVersion) return;
+      // Loop guard: this URL already is the repair reload for this version, so don't reload again.
+      try {
+        const here = new URLSearchParams(location.search);
+        if (here.get('repair') === 'version' && here.get('v') === String(requiredVersion)) return;
+      } catch (_) {}
       try {
         if ('serviceWorker' in navigator) {
           const regs = await navigator.serviceWorker.getRegistrations();
@@ -645,8 +650,7 @@ input::placeholder,textarea::placeholder{color:var(--muted2)}
       <div class="sec-title">Recent trips</div>
       <div class="card" id="trip-list">
         <div class="empty-state">
-          <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-          No trips yet - tap Start to begin!
+          Loading your trips...
         </div>
       </div>
       <div style="height:8px"></div>
@@ -1311,6 +1315,17 @@ const firebaseConfig = {
 
 const app  = initializeApp(firebaseConfig);
 const auth = getAuth(app);
+// Storage can throw (blocked site data, private mode): these wrappers never throw.
+function makeSafeStorage(kind) {
+  const store = () => (kind === 'session' ? window.sessionStorage : window.localStorage);
+  return {
+    getItem(k) { try { return store().getItem(k); } catch (_) { return null; } },
+    setItem(k, v) { try { store().setItem(k, v); } catch (_) {} },
+    removeItem(k) { try { store().removeItem(k); } catch (_) {} }
+  };
+}
+const safeLocal = makeSafeStorage('local');
+const safeSession = makeSafeStorage('session');
 const authPersistenceReady = setPersistence(auth, browserLocalPersistence).catch((error) => {
   console.warn('Could not force local auth persistence:', error);
 });
@@ -1481,13 +1496,13 @@ function installPromptSessionKey() {
 }
 
 function hasInstallConfirmedFlag() {
-  return localStorage.getItem(installConfirmedKey()) === '1'
-    || localStorage.getItem(`${INSTALL_CONFIRMED_KEY_PREFIX}device`) === '1';
+  return safeLocal.getItem(installConfirmedKey()) === '1'
+    || safeLocal.getItem(`${INSTALL_CONFIRMED_KEY_PREFIX}device`) === '1';
 }
 
 function setInstallConfirmedFlag() {
-  localStorage.setItem(installConfirmedKey(), '1');
-  localStorage.setItem(`${INSTALL_CONFIRMED_KEY_PREFIX}device`, '1');
+  safeLocal.setItem(installConfirmedKey(), '1');
+  safeLocal.setItem(`${INSTALL_CONFIRMED_KEY_PREFIX}device`, '1');
 }
 
 function isLogM8Downloaded() {
@@ -1844,11 +1859,15 @@ async function checkMaintenanceMode() {
     return maintenanceMode;
   }
   try {
-    await fetchAndActivate(remoteConfig);
+    // Never let a slow/hung Remote Config fetch hold the app on a blank screen.
+    await Promise.race([
+      fetchAndActivate(remoteConfig),
+      new Promise(resolve => setTimeout(resolve, 5000))
+    ]);
   } catch (e) {
     // keep defaults if fetch fails
   }
-  maintenanceMode = getValue(remoteConfig, 'maintenance_mode').asBoolean();
+  try { maintenanceMode = getValue(remoteConfig, 'maintenance_mode').asBoolean(); } catch (_e) { maintenanceMode = false; }
   return maintenanceMode;
 }
 
@@ -2073,8 +2092,10 @@ authPersistenceReady.then(() => getRedirectResult(auth)).then(result => {
 
 onAuthStateChanged(auth, async user => {
   if (singleInstanceBlocked) return;
+  if (window.__logm8Startup) window.__logm8Startup.mark('auth');
+  const STARTUP_MAINTENANCE_WAIT_MS = 4000;
+  const isInMaintenance = await Promise.race([checkMaintenanceMode(), new Promise((resolve) => setTimeout(() => resolve(false), STARTUP_MAINTENANCE_WAIT_MS))]);
   document.getElementById('loading').style.display = 'none';
-  const isInMaintenance = await checkMaintenanceMode();
   if (isInMaintenance) {
     showMaintenanceScreen(true);
     return;
@@ -2097,6 +2118,9 @@ onAuthStateChanged(auth, async user => {
     recordUserActivity('app_open');
     const params = new URLSearchParams(window.location.search);
     const isCheckoutReturn = Boolean(params.get('checkout'));
+    // Restore an unsaved/running trip straight away; never wait on network loads for it.
+    let restoredEarly = false;
+    try { restoredEarly = restoreActiveTripIfNeeded(); } catch (e) { console.warn('Early trip restore failed:', e); }
     const profilePromise = ensureUserProfile();
     const proPromise = loadProStatus();
     const dataPromise = loadData();
@@ -2106,7 +2130,11 @@ onAuthStateChanged(auth, async user => {
     } else {
       refreshSubscriptionStatus().catch(() => null);
     }
-    restoreActiveTripIfNeeded();
+    if (!restoredEarly) restoreActiveTripIfNeeded();
+    else if (activeTripVehicle?.id) {
+      const known = vehicles.find(v => v.id === activeTripVehicle.id);
+      if (known?.name) activeTripVehicle = { id: known.id, name: known.name };
+    }
     updateSummary();
     maybeTrackTrialStart();
     maybeSendLogbookReminder();
@@ -2117,6 +2145,10 @@ onAuthStateChanged(auth, async user => {
     maybeOpenRequestedUpgrade();
   } else {
     resetAuthButtons();
+    // Signed out: stop the clock and GPS but keep the trip draft on this device.
+    try { stopActiveTripTimers(); stopGPS(); } catch (e) { console.warn('Stopping trip timers failed:', e); }
+    running = false;
+    tripsLoadSettled = false;
     currentUser = null;
     isPro = false;
     currentSubscription = null;
@@ -2533,7 +2565,7 @@ window.saveLogbookDetails = async () => {
 };
 
 function notificationsEnabled() {
-  return localStorage.getItem(NOTIF_KEY) === '1';
+  return safeLocal.getItem(NOTIF_KEY) === '1';
 }
 
 function reminderStorageKey() {
@@ -2612,12 +2644,12 @@ function maybeSendLogbookReminder() {
   const latestTripMs = getMostRecentTripMs();
   const baselineMs = latestTripMs || trialStartedAtMs || now;
   if (now - baselineMs < REMINDER_MS) return;
-  const lastSentMs = Number(localStorage.getItem(reminderStorageKey()) || 0);
+  const lastSentMs = Number(safeLocal.getItem(reminderStorageKey()) || 0);
   if (lastSentMs && now - lastSentMs < REMINDER_MS) return;
   new Notification('LogM8 reminder', {
     body: 'Your logbook has been quiet this week. Record a trip so your ATO report stays complete.'
   });
-  localStorage.setItem(reminderStorageKey(), String(now));
+  safeLocal.setItem(reminderStorageKey(), String(now));
 }
 
 function urlBase64ToUint8Array(base64String) {
@@ -2736,7 +2768,7 @@ window.closeNotificationsOutside = e => {
 
 window.toggleNotifications = async () => {
   if (notificationsEnabled()) {
-    localStorage.removeItem(NOTIF_KEY);
+    safeLocal.removeItem(NOTIF_KEY);
     await updateBackendNotificationPreference(false);
     updateNotificationsUI();
     showToast('Notifications disabled');
@@ -2754,7 +2786,7 @@ window.toggleNotifications = async () => {
     updateNotificationsUI();
     return;
   }
-  localStorage.setItem(NOTIF_KEY, '1');
+  safeLocal.setItem(NOTIF_KEY, '1');
   updateNotificationsUI();
   showToast('Notifications enabled');
   sendTestNotification();
@@ -2881,7 +2913,7 @@ function onboardingSeenKey() {
 }
 
 function hasSeenOnboarding() {
-  return localStorage.getItem(onboardingSeenKey()) === '1';
+  return safeLocal.getItem(onboardingSeenKey()) === '1';
 }
 
 function renderOnboardingSlide() {
@@ -2911,7 +2943,7 @@ window.nextOnboardingSlide = () => {
 };
 
 window.skipOnboarding = () => {
-  localStorage.setItem(onboardingSeenKey(), '1');
+  safeLocal.setItem(onboardingSeenKey(), '1');
   document.getElementById('onboarding-modal').classList.remove('open');
   maybeShowInstallPrompt();
 };
@@ -3203,17 +3235,17 @@ async function maybeShowInstallPrompt() {
   const onboarding = document.getElementById('onboarding-modal');
   if (onboarding?.classList.contains('open')) return;
   const key = installPromptSessionKey();
-  if (sessionStorage.getItem(key) === '1') return;
-  sessionStorage.setItem(key, '1');
+  if (safeSession.getItem(key) === '1') return;
+  safeSession.setItem(key, '1');
   window.openInstallPrompt('login');
 }
 
 function maybeTrackTrialStart() {
   if (!currentUser || !trialStartedAtMs) return;
   const key = `logm8_trial_start_tracked_${currentUser.uid}`;
-  if (localStorage.getItem(key) === '1') return;
+  if (safeLocal.getItem(key) === '1') return;
   trackEvent('trial_start', { trial_days: TRIAL_DAYS });
-  localStorage.setItem(key, '1');
+  safeLocal.setItem(key, '1');
 }
 
 async function ensureUserProfile() {
@@ -3594,6 +3626,7 @@ window.signInGoogle = async () => {
 };
 
 // -- SIGN IN EMAIL -----------------------------------------------
+const LOGIN_TIMEOUT_MS = 20000;
 window.signInEmail = async () => {
   const email = document.getElementById('login-email').value.trim();
   const pass  = document.getElementById('login-pass').value;
@@ -3602,8 +3635,12 @@ window.signInEmail = async () => {
   btn.disabled = true; btn.textContent = 'Signing in...';
   try {
     clearAuthMessages();
-    await authPersistenceReady;
-    await signInWithEmailAndPassword(auth, email, pass);
+    await withTimeout(authPersistenceReady, 3000);
+    const signIn = await withTimeout(signInWithEmailAndPassword(auth, email, pass), LOGIN_TIMEOUT_MS);
+    if (signIn.timedOut) {
+      showAuthError('Signing in is taking too long. Check your connection and try again.');
+      return;
+    }
   } catch(e) {
     if (e?.code === 'auth/network-request-failed') {
       showAuthRepairError('LogM8 could not reach login services. Your connection may be offline or the app cache may be stale.');
@@ -3826,7 +3863,7 @@ function renderCachedDataSnapshot() {
     updateSummary();
     return true;
   } catch (e) {
-    localStorage.removeItem(key);
+    safeLocal.removeItem(key);
     return false;
   }
 }
@@ -3848,9 +3885,17 @@ function cacheCurrentDataSnapshot() {
 }
 
 // -- FIRESTORE: LOAD DATA ----------------------------------------
+let tripsLoadSettled = false;
+const DATA_LOAD_SLOW_MS = 15000;
 async function loadData({ useCache = true } = {}) {
   if (!currentUser) return;
   const hadCachedData = useCache ? renderCachedDataSnapshot() : false;
+  if (!hadCachedData && !tripsLoadSettled) renderTrips();
+  const slowTimer = setTimeout(() => {
+    showToast(navigator.onLine === false
+      ? 'You are offline. Your trips will load when you reconnect.'
+      : 'Loading your trips is taking longer than usual. Check your connection.', 6000);
+  }, DATA_LOAD_SLOW_MS);
   try {
     const tripsQuery = query(collection(db,'trips'), where('uid','==',currentUser.uid), orderBy('createdAt','desc'));
     const expensesQuery = query(collection(db,'expenses'), where('uid','==',currentUser.uid), orderBy('createdAt','desc'));
@@ -3873,8 +3918,11 @@ async function loadData({ useCache = true } = {}) {
     });
     renderExpenses();
     cacheCurrentDataSnapshot();
+    tripsLoadSettled = true;
+    renderTrips();
   } catch(e) {
-    const offline = !navigator.onLine || String(e?.message || '').toLowerCase().includes('network');
+    tripsLoadSettled = true;
+    const offline = !navigator.onLine || String(e?.message || '').toLowerCase().includes('network') || isOfflineError(e);
     if (offline) {
       const tripList = document.getElementById('trip-list');
       const expList = document.getElementById('exp-list');
@@ -3886,9 +3934,15 @@ async function loadData({ useCache = true } = {}) {
       }
       showToast(hadCachedData ? 'Offline mode: showing your last saved data' : 'Offline mode: no saved data available');
     } else {
+      const tripList = document.getElementById('trip-list');
+      if (!hadCachedData && tripList && trips.length === 0) {
+        tripList.innerHTML = '<div class="empty-state">Could not load your trips right now. Reopen LogM8 to try again.</div>';
+      }
       showToast('Could not load data right now');
     }
     console.error('Load error:', e);
+  } finally {
+    clearTimeout(slowTimer);
   }
 }
 
@@ -3972,7 +4026,7 @@ window.saveTrip = async () => {
     writePromise.catch(err => {
       console.error('Trip sync failed:', err);
       if (String(err?.code || err?.message || '').includes('permission-denied')) {
-        showToast('Your trial has ended. Subscribe to save this trip — it is kept on this device.', 6000);
+        showToast('Could not save: your trial has ended. Subscribe to save this trip — it is kept on this device.', 6000);
       }
     });
     const writeResult = await withTimeout(writePromise, TRIP_SAVE_TIMEOUT_MS);
@@ -4000,6 +4054,7 @@ window.saveTrip = async () => {
     renderTrips();
     updateSummary();
     recordUserActivity('trip_saved');
+    tripSaveRetryOnOnline = false;
     clearActiveTripDraft();
     resetTripUI();
     showToast(savedLocallyOnly ? 'Saved on this device, will sync' : 'Trip saved', savedLocallyOnly ? 4000 : 2500);
@@ -4009,10 +4064,18 @@ window.saveTrip = async () => {
     protectActiveTrip('save_error');
     const code = String(e?.code || e?.message || '');
     if (code.includes('permission-denied')) {
-      showToast('Your trial has ended. Subscribe to save this trip — it is kept on this device.', 6000);
+      showToast('Could not save: your trial has ended. Subscribe to save this trip — it is kept on this device.', 6000);
       window.openUpgrade();
+    } else if (isOfflineError(e)) {
+      tripSaveRetryOnOnline = true;
+      showToast("You are offline. Could not save yet; the trip is kept on this device and will save when you reconnect.", 6000);
+    } else if (code.includes('resource-exhausted')) {
+      showToast('Too many saves right now. Could not save; trip kept on this device. Try again in a minute.', 6000);
+    } else if (code.includes('unauthenticated')) {
+      showToast('Your sign-in expired. Could not save; trip kept on this device. Sign in again, then tap Save trip.', 6000);
     } else {
-      showToast("Couldn't save. Trip kept on this device; tap Save to retry.", 6000);
+      tripSaveRetryOnOnline = true;
+      showToast("Could not save. Trip kept on this device; tap Save to retry.", 6000);
     }
     recordUserActivity('trip_save_error');
     console.error(e);
@@ -4021,6 +4084,20 @@ window.saveTrip = async () => {
     setSaveTripBusy(false);
   }
 };
+
+// After a failed save, retry the stopped trip automatically once the device is back online.
+let tripSaveRetryOnOnline = false;
+window.addEventListener('online', () => {
+  if (!tripSaveRetryOnOnline || !currentUser || running || savingTrip) return;
+  const draft = getActiveTripDraft();
+  if (!draft || draft.status !== 'stopped' || draft.uid !== currentUser.uid) return;
+  setTimeout(() => {
+    if (tripSaveRetryOnOnline && !running && !savingTrip && currentUser) {
+      showToast('Back online. Saving your trip...');
+      window.saveTrip();
+    }
+  }, 1000);
+});
 
 // -- FIRESTORE: SAVE EXPENSE ------------------------------------
 window.saveExpense = async (type) => {
@@ -4054,8 +4131,12 @@ window.saveExpense = async (type) => {
     return;
   }
   sub += ' - ' + activeVehicle.name;
+  if (savingExpense) return;
+  savingExpense = true;
+  setExpenseSaveButtonsBusy(true);
+  let slowTimer = null;
   try {
-    const ref = await addDoc(collection(db,'expenses'), {
+    const addPromise = addDoc(collection(db,'expenses'), {
       uid: currentUser.uid,
       type: expenseType, title, sub,
       vehicleId: activeVehicle.id,
@@ -4066,24 +4147,15 @@ window.saveExpense = async (type) => {
       updatedAt: serverTimestamp(),
       createdAt: serverTimestamp()
     });
-    let receiptFields = {};
-    let receiptUploadFailed = false;
-    let receiptBlockedByPlan = false;
-    if (receiptFile && hasProTier()) {
-      try {
-        showToast('Uploading receipt...');
-        receiptFields = await uploadReceiptForExpense(ref.id, receiptFile) || {};
-        if (receiptFields.receiptUrl) {
-          await setDoc(doc(db, 'expenses', ref.id), { ...receiptFields, updatedAt: serverTimestamp() }, { merge: true });
-        }
-      } catch(receiptErr) {
-        receiptUploadFailed = true;
-        console.error('Receipt upload failed:', receiptErr);
-      }
-    } else if (receiptFile) {
-      receiptBlockedByPlan = true;
-    }
-    expenses.unshift({ id: ref.id, type: expenseType, title, sub, vehicleId: activeVehicle.id, vehicleName: activeVehicle.name, amount, isWork, cfg: { color: cfg.color, bg: cfg.bg, svgPath: cfg.svgPath }, version: 1, ...receiptFields });
+    // Don't abort the write (that could duplicate it); just tell the user it's slow.
+    slowTimer = setTimeout(() => {
+      showToast(navigator.onLine === false ? 'You are offline. The expense will save when you reconnect.' : 'Saving expense is taking longer than usual. Check your connection.', 5000);
+    }, EXPENSE_SLOW_MS);
+    const ref = await addPromise;
+    clearTimeout(slowTimer); slowTimer = null;
+    const listItem = { id: ref.id, type: expenseType, title, sub, vehicleId: activeVehicle.id, vehicleName: activeVehicle.name, amount, isWork, cfg: { color: cfg.color, bg: cfg.bg, svgPath: cfg.svgPath }, version: 1 };
+    // Show the expense straight away; the receipt (if any) is attached afterwards.
+    expenses.unshift(listItem);
     cacheCurrentDataSnapshot();
     if (type === 'fuel') {
       ['fuel-val','fuel-lit','fuel-posto','fuel-km'].forEach(id => document.getElementById(id).value = '');
@@ -4094,10 +4166,66 @@ window.saveExpense = async (type) => {
     }
     renderExpenses();
     updateSummary();
+    let receiptFields = {};
+    let receiptUploadFailed = false;
+    let receiptBlockedByPlan = false;
+    if (receiptFile && hasProTier()) {
+      let receiptSlowTimer = null;
+      try {
+        showToast('Uploading receipt...');
+        receiptSlowTimer = setTimeout(() => showToast('Expense saved. Receipt still uploading...', 4000), 3000);
+        const upload = await withTimeout(uploadReceiptForExpense(ref.id, receiptFile), RECEIPT_UPLOAD_TIMEOUT_MS);
+        if (upload.timedOut) throw new Error('receipt-upload-timeout');
+        receiptFields = upload.value || {};
+        if (receiptFields.receiptUrl) {
+          try {
+            const patch = await withTimeout(setDoc(doc(db, 'expenses', ref.id), { ...receiptFields, updatedAt: serverTimestamp() }, { merge: true }), RECEIPT_UPLOAD_TIMEOUT_MS);
+            if (patch.timedOut) throw new Error('receipt-patch-timeout');
+          } catch (patchErr) {
+            receiptFields = {};
+            throw patchErr;
+          }
+        }
+      } catch(receiptErr) {
+        receiptFields = {};
+        receiptUploadFailed = true;
+        console.error('Receipt upload failed:', receiptErr);
+      } finally {
+        if (receiptSlowTimer) clearTimeout(receiptSlowTimer);
+      }
+      if (receiptFields.receiptUrl) {
+        Object.assign(listItem, receiptFields);
+        cacheCurrentDataSnapshot();
+        renderExpenses();
+      }
+    } else if (receiptFile) {
+      receiptBlockedByPlan = true;
+    }
     recordUserActivity('expense_saved');
     showToast(receiptFields.receiptUrl ? 'Expense + receipt saved' : receiptBlockedByPlan ? 'Expense saved. Receipt vault is Pro.' : receiptUploadFailed ? 'Expense saved, receipt upload failed' : 'Expense saved');
-  } catch(e) { showToast('Error saving expense'); console.error(e); }
+  } catch(e) {
+    showToast(isOfflineError(e) ? 'Error saving expense: you are offline. Try again when connected.' : 'Error saving expense');
+    console.error(e);
+  } finally {
+    if (slowTimer) clearTimeout(slowTimer);
+    savingExpense = false;
+    setExpenseSaveButtonsBusy(false);
+  }
 };
+
+let savingExpense = false;
+const EXPENSE_SLOW_MS = 4000;
+const RECEIPT_UPLOAD_TIMEOUT_MS = 30000;
+function setExpenseSaveButtonsBusy(busy) {
+  document.querySelectorAll('[onclick*="saveExpense("]').forEach(btn => {
+    btn.disabled = !!busy;
+    if (busy) btn.setAttribute('aria-busy', 'true'); else btn.removeAttribute('aria-busy');
+  });
+}
+function isOfflineError(err) {
+  const code = String(err?.code || '').replace(/^(firestore|functions)\//, '');
+  return code === 'unavailable' || String(err?.message || '').toLowerCase().includes('offline') || navigator.onLine === false;
+}
 
 function getRecordVersion(item) {
   const v = Number(item?.version);
@@ -4319,7 +4447,9 @@ window.editTrip = async (tripId) => {
   document.getElementById('edit-trip-modal').classList.add('open');
 };
 
+let savingTripEdit = false;
 window.saveTripEdit = async () => {
+  if (savingTripEdit) return;
   const tripId = editingTripId;
   const trip = trips.find(t => t.id === tripId);
   if (!trip) { closeEditTrip(); return; }
@@ -4352,8 +4482,15 @@ window.saveTripEdit = async () => {
   const baseVersion = editingTripBaseVersion || getRecordVersion(trip);
   saveBtn.disabled = true;
   saveBtn.textContent = 'Saving...';
+  savingTripEdit = true;
   try {
-    await updateTripConflictSafe(tripId, updates, baseVersion);
+    // Stay busy until the transaction settles (a second tap would start a competing one), but say so if it's slow.
+    const editPromise = updateTripConflictSafe(tripId, updates, baseVersion);
+    const edit = await withTimeout(editPromise, 15000);
+    if (edit.timedOut) {
+      showToast('Updating the trip is taking longer than usual. Check your connection.', 5000);
+      await editPromise;
+    }
     const idx = trips.findIndex(t => t.id === tripId);
     if (idx >= 0) trips[idx] = { ...trips[idx], ...updates, version: baseVersion + 1 };
     closeEditTrip();
@@ -4370,9 +4507,10 @@ window.saveTripEdit = async () => {
       refreshNextOdometerStart({ force: true });
       return;
     }
-    showToast('Could not update trip');
+    showToast(isOfflineError(e) ? 'You are offline. Trip not updated; try again when connected.' : 'Could not update trip');
     console.error(e);
   } finally {
+    savingTripEdit = false;
     saveBtn.disabled = false;
     saveBtn.textContent = 'Save trip';
   }
@@ -4532,6 +4670,10 @@ window.deleteExpense = async (expenseId) => {
 // -- RENDER TRIPS ------------------------------------------------
 function renderTrips() {
   const list = document.getElementById('trip-list');
+  if (trips.length === 0 && !tripsLoadSettled) {
+    list.innerHTML = '<div class="empty-state">Loading your trips...</div>';
+    return;
+  }
   if (trips.length === 0) {
     list.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>No trips yet - tap Start to begin!</div>';
     return;
@@ -4555,8 +4697,8 @@ function renderTrips() {
         <div class="hist-km">${kmText} km</div>
         <span class="badge" style="background:${bg};color:${color}">${label}</span>
         <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px">
-          <button class="mini-btn primary" onclick="editTrip('${t.id}')">Edit</button>
-          <button class="mini-btn warn" onclick="deleteTrip('${t.id}')">Delete</button>
+          <button class="mini-btn primary" data-id="${escapeHtml(t.id)}" onclick="editTrip(this.dataset.id)">Edit</button>
+          <button class="mini-btn warn" data-id="${escapeHtml(t.id)}" onclick="deleteTrip(this.dataset.id)">Delete</button>
         </div>
       </div>
     </div>`;
@@ -4583,9 +4725,9 @@ function renderExpenses() {
       <div class="hist-right">
         <div class="hist-km">$${parseFloat(e.amount||0).toFixed(2)}</div>
         <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px">
-          ${hasReceipt ? `<button class="mini-btn primary" onclick="openReceipt('${e.id}')">View receipt</button>` : ''}
-          <button class="mini-btn primary" onclick="editExpense('${e.id}')">Edit</button>
-          <button class="mini-btn warn" onclick="deleteExpense('${e.id}')">Delete</button>
+          ${hasReceipt ? `<button class="mini-btn primary" data-id="${escapeHtml(e.id)}" onclick="openReceipt(this.dataset.id)">View receipt</button>` : ''}
+          <button class="mini-btn primary" data-id="${escapeHtml(e.id)}" onclick="editExpense(this.dataset.id)">Edit</button>
+          <button class="mini-btn warn" data-id="${escapeHtml(e.id)}" onclick="deleteExpense(this.dataset.id)">Delete</button>
         </div>
       </div>
     </div>`;
@@ -6409,9 +6551,9 @@ function writeStoredJson(storage, key, value) {
 function getActiveTripDraft() {
   const keys = [activeTripKey(), ACTIVE_TRIP_LAST_KEY];
   for (const key of keys) {
-    const sessionDraft = readStoredJson(sessionStorage, key);
+    const sessionDraft = readStoredJson(safeSession, key);
     if (sessionDraft?.startedAtMs && (!currentUser?.uid || sessionDraft.uid === currentUser.uid)) return sessionDraft;
-    const localDraft = readStoredJson(localStorage, key);
+    const localDraft = readStoredJson(safeLocal, key);
     if (localDraft?.startedAtMs && (!currentUser?.uid || localDraft.uid === currentUser.uid)) return localDraft;
   }
   return null;
@@ -6421,7 +6563,7 @@ function clearActiveTripDraft() {
   const key = activeTripKey();
   try { localStorage.removeItem(key); } catch (_) {}
   try { sessionStorage.removeItem(key); } catch (_) {}
-  const last = readStoredJson(localStorage, ACTIVE_TRIP_LAST_KEY) || readStoredJson(sessionStorage, ACTIVE_TRIP_LAST_KEY);
+  const last = readStoredJson(safeLocal, ACTIVE_TRIP_LAST_KEY) || readStoredJson(safeSession, ACTIVE_TRIP_LAST_KEY);
   if (!last?.uid || last.uid === currentUser?.uid) {
     try { localStorage.removeItem(ACTIVE_TRIP_LAST_KEY); } catch (_) {}
     try { sessionStorage.removeItem(ACTIVE_TRIP_LAST_KEY); } catch (_) {}
@@ -6469,10 +6611,10 @@ function saveActiveTripDraft(status = running ? 'running' : 'stopped') {
     vehicleName: activeVehicle.name
   };
   const key = activeTripKey();
-  writeStoredJson(localStorage, key, draft);
-  writeStoredJson(sessionStorage, key, draft);
-  writeStoredJson(localStorage, ACTIVE_TRIP_LAST_KEY, draft);
-  writeStoredJson(sessionStorage, ACTIVE_TRIP_LAST_KEY, draft);
+  writeStoredJson(safeLocal, key, draft);
+  writeStoredJson(safeSession, key, draft);
+  writeStoredJson(safeLocal, ACTIVE_TRIP_LAST_KEY, draft);
+  writeStoredJson(safeSession, ACTIVE_TRIP_LAST_KEY, draft);
 }
 
 function protectActiveTrip(reason = 'autosave') {
@@ -6648,6 +6790,7 @@ function showStoppedTripUI() {
 function restoreActiveTripIfNeeded() {
   const draft = getActiveTripDraft();
   if (!draft || draft.uid !== currentUser?.uid || !draft.startedAtMs) return false;
+  if (running && intv && activeTripStartedAtMs === (Number(draft.startedAtMs) || 0)) return true;
   const draftStartedAtMs = Number(draft.startedAtMs) || Date.now();
   const draftAgeMs = Date.now() - draftStartedAtMs;
   if (draftAgeMs > ACTIVE_TRIP_STALE_MS && draft.status !== 'stopped') {
@@ -6763,17 +6906,42 @@ setupNativeBackProtection();
 // Ignore stationary GPS jitter, weak fixes and impossible location jumps.
 const GPS_MAX_ACCURACY_M = 35;
 const GPS_MIN_STEP_M = 8;
+const GPS_JITTER_FLOOR_M = 15;
 const GPS_MAX_SPEED_MS = 60;
 const GPS_MAX_STEP_NO_TIME_M = 120; // cap for steps when two fixes share a timestamp (speed unknowable)
 // Native apps: the WebView's watchPosition is suspended when the screen locks, so the
 // background-geolocation plugin (foreground service on Android, background location on iOS)
 // feeds the same handler. Web keeps navigator.geolocation.
 let bgWatcherId=null,bgWatchSeq=0;
+let gpsWatchdogTimer=null,gpsHasFix=false,gpsErrorToastShown=false;
+const GPS_NO_FIX_WATCHDOG_MS = 30000;
+function clearGpsWatchdog(){ if(gpsWatchdogTimer){clearTimeout(gpsWatchdogTimer);gpsWatchdogTimer=null;} }
+function armGpsWatchdog(){
+  clearGpsWatchdog();
+  gpsWatchdogTimer=setTimeout(()=>{
+    gpsWatchdogTimer=null;
+    if(running && !gpsHasFix) setGPS('acquiring','Still looking for GPS…');
+  },GPS_NO_FIX_WATCHDOG_MS);
+}
+function onGpsError(err){
+  const code=Number(err?.code);
+  if(code===1){
+    clearGpsWatchdog();
+    setGPS('off','Location off');
+    showToast('Location is off for LogM8. Turn it on, or type the odometer at the end.', 6000);
+    return;
+  }
+  // 2 (position unavailable) / 3 (timeout): the watch keeps trying.
+  setGPS('acquiring','GPS lost, retrying…');
+  if(!gpsErrorToastShown){gpsErrorToastShown=true;showToast('GPS signal lost. LogM8 keeps retrying; you can also type the odometer at the end.', 5000);}
+}
 function startGPS(){
   setGPS('acquiring','Acquiring GPS...');
+  gpsHasFix=false; gpsErrorToastShown=false;
+  armGpsWatchdog();
   if(isNative()){startNativeGPS();return;}
-  if(!navigator.geolocation){setGPS('off','GPS unavailable');return;}
-  watchId=navigator.geolocation.watchPosition(onGpsPosition,()=>setGPS('off','GPS error'),{enableHighAccuracy:true,maximumAge:4000,timeout:15000});
+  if(!navigator.geolocation){clearGpsWatchdog();setGPS('off','GPS unavailable');return;}
+  watchId=navigator.geolocation.watchPosition(onGpsPosition,onGpsError,{enableHighAccuracy:true,maximumAge:4000,timeout:15000});
 }
 
 async function startNativeGPS(){
@@ -6788,7 +6956,7 @@ async function startNativeGPS(){
       distanceFilter:10
     },(loc,err)=>{
       if(err){
-        setGPS('off',err.code==='NOT_AUTHORIZED'?'Location permission needed':'GPS error');
+        if(err.code==='NOT_AUTHORIZED') onGpsError({code:1}); else onGpsError({code:2});
         return;
       }
       if(!loc) return;
@@ -6800,11 +6968,12 @@ async function startNativeGPS(){
     console.warn('Background GPS unavailable, using WebView GPS:',e);
     if(seq!==bgWatchSeq) return;
     if(!navigator.geolocation){setGPS('off','GPS unavailable');return;}
-    watchId=navigator.geolocation.watchPosition(onGpsPosition,()=>setGPS('off','GPS error'),{enableHighAccuracy:true,maximumAge:4000,timeout:15000});
+    watchId=navigator.geolocation.watchPosition(onGpsPosition,onGpsError,{enableHighAccuracy:true,maximumAge:4000,timeout:15000});
   }
 }
 
 function onGpsPosition(pos){
+    gpsHasFix=true; clearGpsWatchdog();
     const acc=Number(pos.coords.accuracy);
     if(Number.isFinite(acc) && acc>GPS_MAX_ACCURACY_M){
       setGPS('active','GPS active - weak signal');
@@ -6815,7 +6984,8 @@ function onGpsPosition(pos){
       const stepM=haversine(lastPos,cur)*1000;
       const dt=Math.max(0,(cur.t-(lastPos.t||cur.t))/1000);
       const speed=dt>0?stepM/dt:0;
-      const floor=Math.max(GPS_MIN_STEP_M,Number.isFinite(acc)?acc:GPS_MIN_STEP_M);
+      // Only count movement clearly beyond the fix's own noise: max(2x accuracy, 15 m) from the last accepted point.
+      const floor=Math.max(GPS_JITTER_FLOOR_M,GPS_MIN_STEP_M,Number.isFinite(acc)?2*acc:GPS_JITTER_FLOOR_M);
       // With dt===0 (duplicate timestamp) speed is unknowable, so a GPS teleport
       // would bypass the speed cap. Accept a no-time step only if it is small
       // enough that it cannot be a teleport.
@@ -6840,11 +7010,16 @@ function stopGPS(){
     const id=bgWatcherId; bgWatcherId=null;
     import('@capacitor-community/background-geolocation').then(({BackgroundGeolocation})=>BackgroundGeolocation.removeWatcher({id})).catch(e=>console.warn('removeWatcher failed:',e));
   }
+  clearGpsWatchdog();
   if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}
   lastPos=null; setGPS('off','GPS off');
 }
 
+let lastTripToggleAtMs = 0;
 window.toggleTrip = async () => {
+  const toggleNow = Date.now();
+  if (toggleNow - lastTripToggleAtMs < 800) return; // ignore accidental double taps
+  lastTripToggleAtMs = toggleNow;
   if (!running && requirePaidAccess('trip tracking')) return;
   if(!running){
     const existingDraft = getActiveTripDraft();
@@ -6886,6 +7061,10 @@ window.toggleTrip = async () => {
     manualTripEndKm = getGpsEstimatedEndKm();
     showStoppedTripUI();
     saveActiveTripDraft('stopped');
+    if (!(gpsKm >= 0.05) && !confirm('No distance was recorded for this trip (0 km). Save it anyway?\n\nTap Cancel to type the end odometer first, or discard the trip.')) {
+      showToast('Trip kept on this device. Type the end odometer and tap Save trip.', 5000);
+      return;
+    }
     showToast('Trip finished. Saving now...');
     await window.saveTrip();
   }
@@ -7053,12 +7232,28 @@ function friendlyError(code){
     'auth/too-many-requests':'Too many attempts. Please try again later.',
     'auth/network-request-failed':'No internet connection.',
     'auth/popup-closed-by-user':'Sign in cancelled.',
+    'auth/invalid-credential':'Incorrect email or password. Try again.',
+    'auth/user-disabled':'This account has been disabled. Contact contact@logm8.com.au.',
+    'auth/unauthorized-domain':'Google sign-in is not authorised on this domain. Open LogM8 from logm8.com.au or use email sign-in.',
+    'auth/account-exists-with-different-credential':'An account already exists with this email using a different sign-in method. Sign in with email and password.',
+    'auth/operation-not-supported-in-this-environment':'Google sign-in is not supported in this browser. Use email sign-in or open LogM8 in Chrome or Safari.',
   };
   return map[code] || 'Something went wrong. Please try again.';
 }
 
 function friendlyBillingError(err){
   if (!navigator.onLine) return 'No internet connection. Please reconnect and try again.';
+  const errCode = String(err?.code || '').replace(/^functions\//, '');
+  switch (errCode) {
+    case 'resource-exhausted': return 'Too many attempts. Please wait a minute and try again.';
+    case 'permission-denied': return 'This checkout is not available for this account. Please contact contact@logm8.com.au.';
+    case 'failed-precondition': return 'Billing is not fully set up for this plan yet. Please contact contact@logm8.com.au.';
+    case 'unauthenticated': return 'Your sign-in expired. Please sign in again and retry.';
+    case 'unavailable':
+      if (String(err?.message || '').toLowerCase().includes('offline')) return 'No internet connection. Please reconnect and try again.';
+      break;
+    default: break;
+  }
   const raw = String(err?.message || err?.details?.message || '').toLowerCase();
   if (raw.includes('resource-exhausted') || raw.includes('too many')) return 'Too many attempts. Please wait and try again.';
   if (raw.includes('permission-denied')) return 'This checkout session is not valid for this account.';
@@ -7116,7 +7311,8 @@ async function loadProStatus() {
     }
 
     if (normalizedVehicles.changed || normalizedLogbook.changed) {
-      await setDoc(userRef, { vehicles, activeVehicleId, logbookDetails }, { merge: true });
+      // Fire-and-forget: a slow/hung normalisation write must not block the UI or trip restore.
+      setDoc(userRef, { vehicles, activeVehicleId, logbookDetails }, { merge: true }).catch(err => console.warn('Profile normalisation write failed:', err));
     }
     trialStartedAtMs = started;
     trialExpiresAtMs = expires;
@@ -7333,6 +7529,9 @@ window.showToast = (msg, duration = 2500) => {
 
 function hasUnsafeWorkForAutoUpdate() {
   if (editingTripId || editingExpenseId || pendingFuelReceiptFile || pendingOtherReceiptFile) return true;
+  // Never auto-reload under a running trip or an unsaved trip draft.
+  if (running) return true;
+  try { if (getActiveTripDraft()?.startedAtMs) return true; } catch (_) { return true; }
   const openModal = document.querySelector('.modal.open,.sheet-modal.open');
   if (openModal && !openModal.id?.includes('install')) return true;
   return false;
@@ -7357,14 +7556,14 @@ async function checkForFreshAppVersion({ silent = true, reason = 'timer' } = {})
   if (!requiredVersion || requiredVersion <= currentVersion) return false;
 
   if (hasUnsafeWorkForAutoUpdate()) {
-    sessionStorage.setItem(`logm8_auto_update_pending_${requiredVersion}`, String(Date.now()));
+    safeSession.setItem(`logm8_auto_update_pending_${requiredVersion}`, String(Date.now()));
     if (!silent && typeof showToast === 'function') showToast('Update ready. Save your current entry and LogM8 will refresh.', 4500);
     return false;
   }
 
   const updateKey = `logm8_auto_update_${requiredVersion}`;
-  if (sessionStorage.getItem(updateKey) === 'running') return true;
-  sessionStorage.setItem(updateKey, 'running');
+  if (safeSession.getItem(updateKey) === 'running') return true;
+  safeSession.setItem(updateKey, 'running');
   window.__logm8AutoUpdating = true;
 
   try {
