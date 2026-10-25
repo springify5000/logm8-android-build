@@ -1,1 +1,0 @@
-window.Capacitor = window.Capacitor || null;
