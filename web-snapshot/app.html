@@ -987,7 +987,7 @@ input::placeholder,textarea::placeholder{color:var(--muted2)}
         </div>
         <div class="help-item">
           <button class="help-q" onclick="toggleFaq(this)">How do I cancel my subscription?<span>+</span></button>
-          <div class="help-a">Open Manage subscription in Profile, then cancel in Stripe or your app store billing page. Access stays active until the end of your paid period.</div>
+          <div class="help-a" id="faq-cancel-answer">Open Manage subscription in Profile, then cancel in Stripe or your app store billing page. Access stays active until the end of your paid period.</div>
         </div>
         <div class="help-item">
           <button class="help-q" onclick="toggleFaq(this)">How do I export my logbook for the ATO?<span>+</span></button>
@@ -2210,7 +2210,10 @@ function updateProUI() {
       bannerCopy.textContent = 'Advanced reports and receipt tools are unlocked.';
     } else if (isPro) {
       bannerTitle.textContent = 'LogM8 Basic active';
-      bannerCopy.textContent = 'Upgrade to Pro for receipt vault, ATO checks and accountant packs.';
+      // The stores only sell Basic for now: the app must not promise a Pro upgrade it cannot sell.
+      bannerCopy.textContent = isNative()
+        ? 'LogM8 Pro (receipt vault, ATO checks, accountant packs) is coming soon to the app.'
+        : 'Upgrade to Pro for receipt vault, ATO checks and accountant packs.';
     } else if (isTrialExpired()) {
       bannerTitle.textContent = 'Free trial ended';
       bannerCopy.textContent = 'Upgrade to keep saving trips and expenses.';
@@ -2243,6 +2246,9 @@ function updateProUI() {
   // Show Restore Purchases button only in native app
   const restoreBtn = document.getElementById('restore-btn');
   if (restoreBtn) restoreBtn.style.display = isNative() ? 'block' : 'none';
+  // In the app, no mention of paying outside the store (App Store 3.1.1)
+  const faqCancel = document.getElementById('faq-cancel-answer');
+  if (faqCancel && isNative()) faqCancel.textContent = 'Open Manage subscription in Profile, or cancel in your store subscriptions. Access stays active until the end of your paid period.';
   // Hide Stripe legal note in native app
   const legal = document.querySelector('.upgrade-legal');
   if (legal) {
@@ -3424,6 +3430,11 @@ function getTierLabel() {
 
 function requireProFeature(featureName = 'this Pro feature') {
   if (hasProTier()) return false;
+  if (isNative()) {
+    // The stores only sell Basic for now: never open the Basic paywall from a Pro feature.
+    showToast(`${featureName} is part of LogM8 Pro, coming soon to the app.`);
+    return true;
+  }
   showToast(`${featureName} is included in LogM8 Pro.`);
   window.openUpgrade('pro');
   return true;
@@ -7358,6 +7369,8 @@ window.selectTier = tier => {
 };
 
 window.openUpgrade = (tier = '') => {
+  // The stores only sell Basic for now: a Pro request in the app must not open the Basic paywall.
+  if (isNative() && tier === 'pro') { showToast('LogM8 Pro is coming soon to the app.'); return; }
   const targetTier = tier === 'basic' || tier === 'pro' ? tier : selectedTier;
   selectedTier = targetTier;
   // In native app, show native IAP UI; on web show modal
@@ -7482,6 +7495,7 @@ async function openNativeUpgrade() {
 async function startNativePurchase() {
   if (!rcPurchases) { showToast('Store unavailable'); return; }
   const btn = document.getElementById('upgrade-cta-btn');
+  const idleLabel = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Opening Play Store...';
   try {
@@ -7490,14 +7504,25 @@ async function startNativePurchase() {
     const pkg = offerings.current?.availablePackages?.find(p =>
       p.product?.identifier === productId
     ) || offerings.current?.availablePackages?.[0];
-    if (!pkg) { showToast('Plan not found'); btn.disabled=false; return; }
+    if (!pkg) {
+      // Never buy a different plan than the one picked
+      showToast('This plan is not available in the store right now. Try another plan or contact contact@logm8.com.au.', 5000);
+      btn.disabled = false;
+      btn.textContent = idleLabel;
+      return;
+    }
     const { customerInfo } = await rcPurchases.purchasePackage({ aPackage: pkg });
     const hasEntitlement = customerInfo.entitlements.active[RC_ENTITLEMENT_ID];
+    btn.disabled = false;
+    btn.textContent = idleLabel;
     if (hasEntitlement) {
       trackEvent('upgrade', { plan: selectedPlan, stage: 'active_native' });
       await refreshSubscriptionStatus();
       closeUpgrade();
       showToast('Purchase completed. Syncing your Basic access...');
+    } else {
+      // e.g. a pending payment in the store: do not leave the button stuck on "Opening..."
+      showToast('Purchase received. Your access unlocks as soon as the store confirms the payment.', 5000);
     }
   } catch(e) {
     if (e.code !== 'PURCHASE_CANCELLED') {
