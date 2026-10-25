@@ -85,7 +85,7 @@ else:
         "window.signInApple = async () => {\n"
         "  try {\n"
         "    clearAuthMessages();\n"
-        "    await authPersistenceReady;\n"
+        "    await withTimeout(authPersistenceReady, 3000);\n"
         "    const { FirebaseAuthentication } = await import('./vendor/firebase-authentication.js');\n"
         "    const result = await FirebaseAuthentication.signInWithApple({ skipNativeAuth: true, scopes: ['email', 'name'] });\n"
         "    const idToken = result?.credential?.idToken;\n"

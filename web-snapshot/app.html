@@ -14,7 +14,7 @@
 <!-- Capacitor (injected by native shell when running as app) -->
 <script>window.Capacitor = window.Capacitor || null;</script>
 <script>
-window.LOGM8_APP_CACHE_VERSION = 98;
+window.LOGM8_APP_CACHE_VERSION = 99;
 (function(){
   if (window.Capacitor || !window.fetch) return;
   const currentVersion = Number(window.LOGM8_APP_CACHE_VERSION || 0);
@@ -1425,8 +1425,8 @@ let logbookDetails = {
   makeModel: '',
   rego: ''
 };
-const APP_VERSION = '1.5.35';
-const APP_CACHE_VERSION = '98';
+const APP_VERSION = '1.5.36';
+const APP_CACHE_VERSION = '99';
 const SINGLE_INSTANCE_KEY = 'logm8_active_instance_v1';
 const SINGLE_INSTANCE_CHANNEL = 'logm8_single_instance_v1';
 const SINGLE_INSTANCE_TTL_MS = 30000;
@@ -3602,15 +3602,18 @@ window.signInGoogle = async () => {
   try {
     clearAuthMessages();
     if (!isNative()) {
-      // Web: popup. The redirect return is blocked by browsers when authDomain is another domain.
-      await authPersistenceReady;
+      // Web: popup only. The redirect return is blocked by browsers when authDomain is another domain,
+      // so never fall back to it. Open the popup straight from the tap: any await before signInWithPopup
+      // (e.g. authPersistenceReady) can push window.open outside the user gesture and Safari blocks it.
+      // Firebase queues the persistence switch before saving the signed-in user, so no wait is needed here.
       try {
         await signInWithPopup(auth, googleProvider);
-        return;
       } catch (popupError) {
-        const code = String(popupError?.code || '');
-        if (code !== 'auth/popup-blocked' && code !== 'auth/operation-not-supported-in-this-environment') throw popupError;
+        // A second tap cancels the first popup: the newer attempt carries on.
+        if (popupError?.code === 'auth/cancelled-popup-request') return;
+        throw popupError;
       }
+      return;
     }
     await authPersistenceReady;
     try { sessionStorage.setItem('logm8_google_redirect_pending', '1'); } catch (_err) {}
@@ -3663,7 +3666,7 @@ window.signUpEmail = async () => {
   btn.disabled = true; btn.textContent = 'Creating account...';
   try {
     clearAuthMessages();
-    await authPersistenceReady;
+    await withTimeout(authPersistenceReady, 3000);
     const cred = await createUserWithEmailAndPassword(auth, email, pass);
     await updateProfile(cred.user, { displayName: name });
   } catch(e) {
@@ -7232,6 +7235,7 @@ function friendlyError(code){
     'auth/too-many-requests':'Too many attempts. Please try again later.',
     'auth/network-request-failed':'No internet connection.',
     'auth/popup-closed-by-user':'Sign in cancelled.',
+    'auth/popup-blocked':'Your browser blocked the Google sign-in window. Allow pop-ups for logm8.com.au, then tap Continue with Google again.',
     'auth/invalid-credential':'Incorrect email or password. Try again.',
     'auth/user-disabled':'This account has been disabled. Contact contact@logm8.com.au.',
     'auth/unauthorized-domain':'Google sign-in is not authorised on this domain. Open LogM8 from logm8.com.au or use email sign-in.',

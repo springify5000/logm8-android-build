@@ -329,7 +329,7 @@ else:
     )
     s, n2 = re.subn(r"window\.signInGoogle\s*=\s*async\s*\(\)\s*=>\s*\{", helper, s, count=1)
     branch = (
-        "await authPersistenceReady;\n"
+        "await withTimeout(authPersistenceReady, 3000);\n"
         "    if (isNative()) {\n"
         "      try { await nativeGoogleSignIn(); }\n"
         "      catch (e) { if (!/cancel/i.test(String(e?.message || e?.code || ''))) showAuthError(friendlyError(e?.code || 'auth/native-google-failed')); }\n"
