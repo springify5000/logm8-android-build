@@ -36,8 +36,11 @@ android {
     }
     buildTypes {
         release {
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // R8 on: Play's "DEX code optimization" check (Android vitals, fix by Feb 2027) needs an
+            // optimised, obfuscated DEX. Keep rules: proguard-rules.pro (copied from overlay-proguard-rules.pro).
+            // shrinkResources stays off until the minified build has passed a full device test.
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             if (keystorePropertiesFile.exists()) {
                 signingConfig signingConfigs.release
             }

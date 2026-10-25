@@ -547,6 +547,9 @@ sed -e "s/__VERSION_CODE__/${VERSION_CODE}/" -e "s/__VERSION_NAME__/${VERSION_NA
 cp -R overlay-android/java/. android/app/src/main/java/
 cp -R overlay-android/res/. android/app/src/main/res/
 echo "   native overlay: $(find overlay-android -type f | wc -l) files (widget)"
+# R8 keep rules: replaces the empty proguard-rules.pro that "cap add android" generates
+cp -f overlay-proguard-rules.pro android/app/proguard-rules.pro
+grep -q "minifyEnabled true" android/app/build.gradle && echo "   R8: minify on, keep rules $(grep -c '^-' android/app/proguard-rules.pro) lines"
 if [ -n "${KEYSTORE_B64:-}" ]; then
   echo "$KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > android/app/upload.jks
   {
@@ -574,3 +577,13 @@ chmod +x gradlew
 ./gradlew bundleRelease --no-daemon --stacktrace
 echo "== DONE"
 ls -la app/build/outputs/bundle/release/
+# R8 evidence: the bundle carries the mapping file (Play uses it to de-obfuscate crash reports)
+for aab in app/build/outputs/bundle/release/*.aab; do
+  aab_files="$(unzip -Z1 "$aab" 2>/dev/null || true)"   # no pipe: set -o pipefail + grep -q can misreport
+  case "$aab_files" in
+    *BUNDLE-METADATA/*proguard.map*) echo "   R8 mapping inside $(basename "$aab")" ;;
+    *) echo "   WARNING: no R8 mapping in $(basename "$aab")" ;;
+  esac
+done
+[ -f app/build/outputs/mapping/release/missing_rules.txt ] && { echo "   R8 missing_rules.txt:"; cat app/build/outputs/mapping/release/missing_rules.txt; }
+true
