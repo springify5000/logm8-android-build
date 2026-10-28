@@ -1798,7 +1798,9 @@ function applyTrialPayload(data = {}) {
 
 async function initAnalytics() {
   try {
-    if (firebaseConfig.measurementId && await isAnalyticsSupported()) {
+    // Website only: the store apps' privacy declarations (App Store privacy label, Play data safety)
+    // do not list analytics, so the Android/iOS apps never start Google Analytics.
+    if (!isNative() && firebaseConfig.measurementId && await isAnalyticsSupported()) {
       analytics = getAnalytics(app);
     }
   } catch (e) {
