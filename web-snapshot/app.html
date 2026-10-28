@@ -479,6 +479,13 @@ input::placeholder,textarea::placeholder{color:var(--muted2)}
 
     <div id="auth-error" class="auth-error"></div>
     <div id="auth-success" class="auth-success"></div>
+    <div id="inapp-login-hint" class="auth-install-hint" style="display:none">
+      <div>
+        <div class="auth-install-title" id="inapp-login-title">Open LogM8 in your browser</div>
+        <div class="auth-install-copy" id="inapp-login-copy">Google sign-in doesn't work inside this app. Tap ••• and choose "Open in browser", or sign in with email below.</div>
+      </div>
+      <button class="auth-install-btn" type="button" onclick="copyAppLinkForBrowser()">Copy link</button>
+    </div>
     <div id="ios-install-login-hint" class="auth-install-hint" onclick="openInstallPrompt('auth_hint')">
       <div>
         <div class="auth-install-title" id="ios-install-login-title">Using iPhone?</div>
@@ -1347,6 +1354,8 @@ try {
   remoteConfig = null;
 }
 const googleProvider = new GoogleAuthProvider();
+// Always show Google's account chooser (personal + work accounts on the same browser).
+googleProvider.setCustomParameters({ prompt: 'select_account' });
 const ensureUserProfileFn = httpsCallable(functions, 'ensureUserProfile');
 const recordUserActivityFn = httpsCallable(functions, 'recordUserActivity');
 const submitPrioritySupportTicketFn = httpsCallable(functions, 'submitPrioritySupportTicket');
@@ -3008,6 +3017,7 @@ function installStepMarkup(steps = [], note = '') {
 }
 
 function updateInstallLoginHint() {
+  updateInAppLoginHint();
   const hint = document.getElementById('ios-install-login-hint');
   if (!hint) return;
   const show = false;
@@ -3609,20 +3619,82 @@ async function deleteStoredReceipt(path) {
   }
 }
 
+// In-app browsers (Instagram, Facebook, TikTok...): Google blocks sign-in inside them ("disallowed_useragent").
+function inAppBrowserName() {
+  const ua = navigator.userAgent || '';
+  if (!/Instagram|FBAN|FBAV|FB_IAB|FBIOS|Messenger|TikTok|musical_ly|Snapchat|Line\/|LinkedInApp/i.test(ua)) return '';
+  if (/Instagram/i.test(ua)) return 'Instagram';
+  if (/Messenger/i.test(ua)) return 'Messenger';
+  if (/FBAN|FBAV|FB_IAB|FBIOS/i.test(ua)) return 'Facebook';
+  if (/TikTok|musical_ly/i.test(ua)) return 'TikTok';
+  if (/Snapchat/i.test(ua)) return 'Snapchat';
+  if (/LinkedInApp/i.test(ua)) return 'LinkedIn';
+  return 'this app';
+}
+function isInAppBrowser() { return !isNative() && Boolean(inAppBrowserName()); }
+function inAppGoogleMessage() {
+  return `Google sign-in doesn't work inside ${inAppBrowserName()}. Tap ••• and choose "Open in browser", or sign in with email below.`;
+}
+function updateInAppLoginHint() {
+  const hint = document.getElementById('inapp-login-hint');
+  if (!hint) return;
+  const show = isInAppBrowser();
+  hint.style.display = show ? 'flex' : 'none';
+  if (!show) return;
+  const copy = document.getElementById('inapp-login-copy');
+  if (copy) copy.textContent = inAppGoogleMessage();
+}
+window.copyAppLinkForBrowser = async () => {
+  const link = 'https://www.logm8.com.au/app.html';
+  let copied = false;
+  try { await navigator.clipboard.writeText(link); copied = true; } catch (_) {}
+  if (!copied) {
+    try {
+      const field = document.createElement('textarea');
+      field.value = link; field.setAttribute('readonly', ''); field.style.position = 'fixed'; field.style.opacity = '0';
+      document.body.appendChild(field); field.select(); copied = document.execCommand('copy'); field.remove();
+    } catch (_) {}
+  }
+  trackEvent('inapp_copy_link', { inapp: inAppBrowserName() || 'no', copied: copied ? 'yes' : 'no' });
+  showToast(copied ? 'Link copied. Paste it in Safari or Chrome.' : 'Open www.logm8.com.au/app.html in Safari or Chrome.', 4000);
+};
+// Every sign-in failure is counted in analytics, so a silent drop in sign-ups can be traced.
+function logLoginError(method, e) {
+  const code = String(e?.code || e?.message || 'unknown').slice(0, 90);
+  console.warn(`LogM8 ${method} sign-in failed:`, code);
+  trackEvent('login_error', { method, code, inapp: inAppBrowserName() || 'no', v: APP_VERSION });
+}
+// True while a sign-in/sign-up is running or the login form has typed text: no automatic reloads then.
+function authFormHasInput() {
+  const screen = document.getElementById('auth-screen');
+  if (!screen || screen.style.display === 'none') return false;
+  return ['login-email', 'login-pass', 'signup-name', 'signup-email', 'signup-pass']
+    .some((id) => String(document.getElementById(id)?.value || '').length > 0);
+}
+
 window.signInGoogle = async () => {
   try {
     clearAuthMessages();
+    trackEvent('auth_start', { method: 'google' });
     if (!isNative()) {
+      if (isInAppBrowser()) {
+        logLoginError('google', { code: 'inapp-browser' });
+        showAuthError(inAppGoogleMessage());
+        return;
+      }
       // Web: popup only. The redirect return is blocked by browsers when authDomain is another domain,
       // so never fall back to it. Open the popup straight from the tap: any await before signInWithPopup
       // (e.g. authPersistenceReady) can push window.open outside the user gesture and Safari blocks it.
       // Firebase queues the persistence switch before saving the signed-in user, so no wait is needed here.
+      window.__logm8AuthBusy = true;
       try {
         await signInWithPopup(auth, googleProvider);
       } catch (popupError) {
         // A second tap cancels the first popup: the newer attempt carries on.
         if (popupError?.code === 'auth/cancelled-popup-request') return;
         throw popupError;
+      } finally {
+        window.__logm8AuthBusy = false;
       }
       return;
     }
@@ -3631,6 +3703,7 @@ window.signInGoogle = async () => {
     await signInWithRedirect(auth, googleProvider);
   } catch(e) {
     try { sessionStorage.removeItem('logm8_google_redirect_pending'); } catch (_err) {}
+    logLoginError('google', e);
     if (e?.code === 'auth/network-request-failed') {
       showAuthRepairError('LogM8 could not reach login services. Your connection may be offline or the app cache may be stale.');
     } else {
@@ -3647,21 +3720,25 @@ window.signInEmail = async () => {
   if (!email || !pass) { showAuthError('Please enter your email and password.'); return; }
   const btn = document.getElementById('login-btn');
   btn.disabled = true; btn.textContent = 'Signing in...';
+  window.__logm8AuthBusy = true;
   try {
     clearAuthMessages();
     await withTimeout(authPersistenceReady, 3000);
     const signIn = await withTimeout(signInWithEmailAndPassword(auth, email, pass), LOGIN_TIMEOUT_MS);
     if (signIn.timedOut) {
+      logLoginError('email', { code: 'timeout' });
       showAuthError('Signing in is taking too long. Check your connection and try again.');
       return;
     }
   } catch(e) {
+    logLoginError('email', e);
     if (e?.code === 'auth/network-request-failed') {
       showAuthRepairError('LogM8 could not reach login services. Your connection may be offline or the app cache may be stale.');
     } else {
       showAuthError(friendlyError(e.code));
     }
   } finally {
+    window.__logm8AuthBusy = false;
     resetAuthButtons();
   }
 };
@@ -3675,14 +3752,18 @@ window.signUpEmail = async () => {
   if (pass.length < 6) { showAuthError('Password must be at least 6 characters.'); return; }
   const btn = document.getElementById('signup-btn');
   btn.disabled = true; btn.textContent = 'Creating account...';
+  trackEvent('auth_start', { method: 'email_signup' });
+  window.__logm8AuthBusy = true;
   try {
     clearAuthMessages();
     await withTimeout(authPersistenceReady, 3000);
     const cred = await createUserWithEmailAndPassword(auth, email, pass);
     await updateProfile(cred.user, { displayName: name });
   } catch(e) {
+    logLoginError('email_signup', e);
     showAuthError(friendlyError(e.code));
   } finally {
+    window.__logm8AuthBusy = false;
     resetAuthButtons();
   }
 };
@@ -3694,7 +3775,7 @@ window.resetPassword = async () => {
   try {
     await sendPasswordResetEmail(auth, email);
     showAuthSuccess('Password reset email sent! Check your inbox.');
-  } catch(e) { showAuthError(friendlyError(e.code)); }
+  } catch(e) { logLoginError('password_reset', e); showAuthError(friendlyError(e.code)); }
 };
 
 // -- SIGN OUT ----------------------------------------------------
@@ -7563,6 +7644,9 @@ function hasUnsafeWorkForAutoUpdate() {
   try { if (getActiveTripDraft()?.startedAtMs) return true; } catch (_) { return true; }
   const openModal = document.querySelector('.modal.open,.sheet-modal.open');
   if (openModal && !openModal.id?.includes('install')) return true;
+  // Never reload under a sign-in/sign-up in progress or a half-filled login form.
+  if (window.__logm8AuthBusy) return true;
+  if (authFormHasInput()) return true;
   return false;
 }
 
@@ -7662,17 +7746,12 @@ if (!window.Capacitor && 'serviceWorker' in navigator) {
       checkForFreshAppVersion({ silent: false, reason: 'sw-message' });
     });
     navigator.serviceWorker.addEventListener('controllerchange', () => {
+      // A new service worker taking over does not make this page stale by itself (on a first visit it
+      // always fires, seconds after load, in the middle of sign-up). Reload only if version.json says this
+      // page is old, through the same check that waits for trips, open forms and sign-in to finish.
       if (window.__logm8ControllerReloaded) return;
       window.__logm8ControllerReloaded = true;
-      window.__logm8AutoUpdating = true;
-      if (typeof protectActiveTrip === 'function') protectActiveTrip('controllerchange');
-      const cacheVersion = String(window.LOGM8_APP_CACHE_VERSION);
-      const nextUrl = new URL(location.href);
-      nextUrl.pathname = '/app.html';
-      nextUrl.searchParams.set('v', String(cacheVersion));
-      nextUrl.searchParams.set('controller', '1');
-      nextUrl.searchParams.set('t', String(Date.now()));
-      location.replace(nextUrl.href);
+      if (typeof checkForFreshAppVersion === 'function') checkForFreshAppVersion({ reason: 'controllerchange' });
     });
     window.addEventListener('pageshow', () => checkForFreshAppVersion({ reason: 'pageshow' }));
     window.addEventListener('focus', () => checkForFreshAppVersion({ reason: 'focus' }));
